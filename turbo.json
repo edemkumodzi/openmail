@@ -1,0 +1,10 @@
+{
+  "$schema": "https://v2-8-13.turborepo.dev/schema.json",
+  "tasks": {
+    "typecheck": {},
+    "build": {
+      "dependsOn": [],
+      "outputs": ["dist/**"]
+    }
+  }
+}
