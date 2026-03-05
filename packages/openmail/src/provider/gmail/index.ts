@@ -129,15 +129,21 @@ export namespace GmailProvider {
         pageToken: opts.cursor,
       })
 
-      // Fetch full thread data for each thread
+      // Fetch thread metadata in parallel batches
+      // Using "metadata" format — includes headers and labelIds but not body data,
+      // which is all we need for summaries and is much faster than "full".
+      const BATCH_SIZE = 10
       const threads: Mail.ThreadSummary[] = []
-      for (const thread of res.threads) {
-        if (thread.id) {
-          try {
-            const full = await GmailApi.getThread(client, thread.id, "full")
-            threads.push(GmailMapping.threadToSummary(full, this.accountId))
-          } catch (err) {
-            console.error(`Failed to fetch thread ${thread.id}:`, err)
+      const threadIds = res.threads.map((t) => t.id).filter(Boolean) as string[]
+
+      for (let i = 0; i < threadIds.length; i += BATCH_SIZE) {
+        const batch = threadIds.slice(i, i + BATCH_SIZE)
+        const results = await Promise.allSettled(
+          batch.map((id) => GmailApi.getThread(client, id, "metadata"))
+        )
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            threads.push(GmailMapping.threadToSummary(result.value, this.accountId))
           }
         }
       }

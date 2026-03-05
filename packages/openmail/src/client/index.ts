@@ -262,6 +262,24 @@ export namespace MailClient {
     }
   }
 
+  export async function addLabel(threadId: string, labelId: string): Promise<boolean> {
+    try {
+      await postJson(`/labels/${threadId}/add`, { labelId })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  export async function removeLabel(threadId: string, labelId: string): Promise<boolean> {
+    try {
+      await postJson(`/labels/${threadId}/remove`, { labelId })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // --- SSE (Server-Sent Events) ---
 
   export type EventHandler = (event: {

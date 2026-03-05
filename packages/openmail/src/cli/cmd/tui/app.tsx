@@ -2,6 +2,7 @@ import { createMemo, createSignal, createEffect, on, onMount, onCleanup, Show, S
 import { createStore } from "solid-js/store"
 import { useKeyboard, useTerminalDimensions, useRenderer } from "@opentui/solid"
 import { TextAttributes } from "@opentui/core"
+import { exec } from "child_process"
 import { Mail } from "../../../mail/types.js"
 import { MockData } from "../../../mail/mock.js"
 import { MailClient } from "../../../client/index.js"
@@ -10,12 +11,13 @@ import { SettingsManager } from "./settings.js"
 import { EmptyBorder } from "./component/border.js"
 import { Sidebar } from "./component/sidebar.js"
 import { ThreadList } from "./component/thread-list.js"
-import { ThreadView } from "./component/thread-view.js"
+import { ThreadView, type ThreadViewHandle } from "./component/thread-view.js"
 import { CalendarSidebar } from "./component/calendar-sidebar.js"
 import { KeybindBar, type KeyHint } from "./component/keybind-bar.js"
 import { SettingsView, getSettingItems, cycleSettingValue } from "./component/settings.js"
 import { SearchView, searchThreads } from "./component/search.js"
 import { ComposeView, nextField, prevField, COMPOSE_FIELDS, type ComposeField, type ComposeState } from "./component/compose.js"
+import { LinksPopup } from "./component/links-popup.js"
 
 type View = "inbox" | "thread" | "settings" | "search" | "compose"
 type Focus = "threads" | "sidebar"
@@ -39,6 +41,8 @@ interface AppState {
   composeBody: string
   composeField: ComposeField
   selectedMessageIndex: number
+  showLinksPopup: boolean
+  linksPopupSelectedIndex: number
 }
 
 export function App() {
@@ -65,6 +69,8 @@ export function App() {
     composeBody: "",
     composeField: "to",
     selectedMessageIndex: 0,
+    showLinksPopup: false,
+    linksPopupSelectedIndex: 0,
   })
 
   // Data sources — populated from server or fallback to mock data
@@ -72,6 +78,8 @@ export function App() {
   const [folders, setFolders] = createSignal<Mail.Folder[]>(MockData.folders)
   const [labels, setLabels] = createSignal<Mail.Label[]>(MockData.labels)
   const [events, setEvents] = createSignal<Mail.CalEvent[]>(MockData.events)
+  let threadViewHandle: ThreadViewHandle | undefined
+
   const [serverConnected, setServerConnected] = createSignal(false)
   const [syncStatus, setSyncStatus] = createSignal<"synced" | "syncing" | "offline" | "error">("offline")
   const [accountEmail, setAccountEmail] = createSignal(MockData.me.email)
@@ -200,6 +208,8 @@ export function App() {
       const detail = await MailClient.getThread(thread.id)
       if (detail) {
         setState({ view: "thread", previousView: state.view === "search" ? "search" : "thread", activeThread: detail, selectedMessageIndex: 0 })
+        // Auto-mark as read when opening
+        if (thread.unread) markThreadRead(thread.id)
         return
       }
     }
@@ -277,6 +287,76 @@ export function App() {
     if (exit) exit()
   }
 
+  // Links popup helpers
+  const currentMessageLinks = (): Mail.ExtractedLink[] => {
+    if (!state.activeThread) return []
+    const msg = state.activeThread.messages[state.selectedMessageIndex]
+    return msg?.body.links ?? []
+  }
+
+  const openLinksPopup = () => {
+    const links = currentMessageLinks()
+    if (links.length === 0) return
+    setState({ showLinksPopup: true, linksPopupSelectedIndex: 0 })
+  }
+
+  const closeLinksPopup = () => {
+    setState({ showLinksPopup: false, linksPopupSelectedIndex: 0 })
+  }
+
+  const openUrlInBrowser = (url: string) => {
+    // Use platform-appropriate command to open URL
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
+    exec(`${cmd} "${url}"`)
+  }
+
+  // --- Actions ---
+  // Each action optimistically updates local state, then fires server call in background.
+  // On SSE event (thread.updated), fetchThreads() re-syncs from cache.
+
+  const archiveThread = (threadId: string) => {
+    // Optimistic: remove from current view
+    setAllThreads((prev) => prev.filter((t) => t.id !== threadId))
+    // Adjust selection if we removed the last item
+    setState("selectedThreadIndex", Math.min(state.selectedThreadIndex, Math.max(0, threads().length - 1)))
+    // Fire and forget
+    if (serverConnected()) MailClient.archiveThread(threadId).catch(() => fetchThreads())
+  }
+
+  const trashThread = (threadId: string) => {
+    setAllThreads((prev) => prev.filter((t) => t.id !== threadId))
+    setState("selectedThreadIndex", Math.min(state.selectedThreadIndex, Math.max(0, threads().length - 1)))
+    if (serverConnected()) MailClient.trashThread(threadId).catch(() => fetchThreads())
+  }
+
+  const toggleStar = (threadId: string) => {
+    const thread = threads().find((t) => t.id === threadId)
+    if (!thread) return
+    const newStarred = !thread.starred
+    // Optimistic: toggle starred state in local data
+    setAllThreads((prev) => prev.map((t) => t.id === threadId ? { ...t, starred: newStarred } : t))
+    if (serverConnected()) {
+      const call = newStarred ? MailClient.starThread(threadId) : MailClient.unstarThread(threadId)
+      call.catch(() => fetchThreads())
+    }
+  }
+
+  const toggleUnread = (threadId: string) => {
+    const thread = threads().find((t) => t.id === threadId)
+    if (!thread) return
+    const newUnread = !thread.unread
+    setAllThreads((prev) => prev.map((t) => t.id === threadId ? { ...t, unread: newUnread } : t))
+    if (serverConnected()) {
+      const call = newUnread ? MailClient.markUnread(threadId) : MailClient.markRead(threadId)
+      call.catch(() => fetchThreads())
+    }
+  }
+
+  const markThreadRead = (threadId: string) => {
+    setAllThreads((prev) => prev.map((t) => t.id === threadId ? { ...t, unread: false } : t))
+    if (serverConnected()) MailClient.markRead(threadId).catch(() => {})
+  }
+
   const keybindHints = createMemo((): KeyHint[] => {
     if (state.view === "settings") {
       return [
@@ -306,17 +386,26 @@ export function App() {
         { key: "esc", label: "close" },
       ]
     }
-    if (state.view === "thread") {
+    if (state.view === "thread" && state.showLinksPopup) {
       return [
-        { key: "j/k", label: "messages" },
+        { key: "j/k", label: "navigate" },
+        { key: "enter", label: "open in browser" },
+        { key: "esc", label: "close" },
+      ]
+    }
+    if (state.view === "thread") {
+      const hints: KeyHint[] = [
+        { key: "j/k", label: "scroll" },
+        { key: "J/K", label: "next/prev msg" },
+        { key: "l", label: "links" },
         { key: "r", label: "reply" },
-        { key: "R", label: "reply all" },
-        { key: "f", label: "forward" },
         { key: "a", label: "archive" },
         { key: "d", label: "trash" },
+        { key: "s", label: "star" },
+        { key: "u", label: "unread" },
         { key: "q", label: "back" },
-        { key: "ctrl+b", label: "calendar" },
       ]
+      return hints
     }
     if (state.focus === "sidebar") {
       return [
@@ -338,6 +427,7 @@ export function App() {
       { key: "a", label: "archive" },
       { key: "d", label: "trash" },
       { key: "s", label: "star" },
+      { key: "u", label: "unread" },
       { key: "/", label: "search" },
       { key: "c", label: "compose" },
       { key: ",", label: "settings" },
@@ -350,6 +440,38 @@ export function App() {
     // Global: Ctrl+C to exit
     if (evt.ctrl && evt.name === "c") {
       exitApp()
+      return
+    }
+
+    // Links popup keyboard handling (modal — intercepts all keys when open)
+    if (state.showLinksPopup) {
+      if (evt.name === "escape" || evt.name === "q") {
+        closeLinksPopup()
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "j" || evt.name === "down") {
+        const links = currentMessageLinks()
+        setState("linksPopupSelectedIndex", Math.min(state.linksPopupSelectedIndex + 1, links.length - 1))
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "k" || evt.name === "up") {
+        setState("linksPopupSelectedIndex", Math.max(state.linksPopupSelectedIndex - 1, 0))
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "return") {
+        const links = currentMessageLinks()
+        const link = links[state.linksPopupSelectedIndex]
+        if (link) {
+          openUrlInBrowser(link.url)
+          closeLinksPopup()
+        }
+        evt.preventDefault()
+        return
+      }
+      evt.preventDefault()
       return
     }
 
@@ -620,7 +742,24 @@ export function App() {
         exitApp()
         return
       }
+      if (evt.name === "a") {
+        const thread = threads()[state.selectedThreadIndex]
+        if (thread) archiveThread(thread.id)
+        evt.preventDefault()
+      }
+      if (evt.name === "d") {
+        const thread = threads()[state.selectedThreadIndex]
+        if (thread) trashThread(thread.id)
+        evt.preventDefault()
+      }
       if (evt.name === "s") {
+        const thread = threads()[state.selectedThreadIndex]
+        if (thread) toggleStar(thread.id)
+        evt.preventDefault()
+      }
+      if (evt.name === "u") {
+        const thread = threads()[state.selectedThreadIndex]
+        if (thread) toggleUnread(thread.id)
         evt.preventDefault()
       }
       if (evt.name === "/") {
@@ -640,14 +779,56 @@ export function App() {
         evt.preventDefault()
         return
       }
+      // J/K (shift): jump directly to next/prev message (check before j/k)
+      if (evt.name === "J" || (evt.shift && evt.name === "j")) {
+        threadViewHandle?.jumpToNextMessage()
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "K" || (evt.shift && evt.name === "k")) {
+        threadViewHandle?.jumpToPrevMessage()
+        evt.preventDefault()
+        return
+      }
+      // j/k or arrow keys: scroll line-by-line through the thread
       if (evt.name === "j" || evt.name === "down") {
-        const maxIdx = (state.activeThread?.messageCount ?? 1) - 1
-        setState("selectedMessageIndex", Math.min(state.selectedMessageIndex + 1, maxIdx))
+        threadViewHandle?.scrollDown()
         evt.preventDefault()
         return
       }
       if (evt.name === "k" || evt.name === "up") {
-        setState("selectedMessageIndex", Math.max(state.selectedMessageIndex - 1, 0))
+        threadViewHandle?.scrollUp()
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "a") {
+        if (state.activeThread) {
+          archiveThread(state.activeThread.id)
+          goBack()
+        }
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "d") {
+        if (state.activeThread) {
+          trashThread(state.activeThread.id)
+          goBack()
+        }
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "s") {
+        if (state.activeThread) toggleStar(state.activeThread.id)
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "u") {
+        if (state.activeThread) toggleUnread(state.activeThread.id)
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "l") {
+        openLinksPopup()
         evt.preventDefault()
         return
       }
@@ -730,7 +911,13 @@ export function App() {
                     {state.activeThread!.messageCount} {state.activeThread!.messageCount === 1 ? "msg" : "msgs"}
                   </text>
                 </box>
-                <ThreadView theme={theme()} thread={state.activeThread!} selectedMessageIndex={state.selectedMessageIndex} />
+                <ThreadView
+                  theme={theme()}
+                  thread={state.activeThread!}
+                  selectedMessageIndex={state.selectedMessageIndex}
+                  onSelectedMessageChange={(idx) => setState("selectedMessageIndex", idx)}
+                  ref={(handle) => { threadViewHandle = handle }}
+                />
               </box>
             </Match>
           </Switch>
@@ -772,6 +959,17 @@ export function App() {
             body: state.composeBody,
             activeField: state.composeField,
           }}
+        />
+      </Show>
+
+      {/* Links popup overlay */}
+      <Show when={state.showLinksPopup}>
+        <LinksPopup
+          theme={theme()}
+          links={currentMessageLinks()}
+          selectedIndex={state.linksPopupSelectedIndex}
+          width={dimensions().width}
+          height={dimensions().height}
         />
       </Show>
     </box>

@@ -84,8 +84,10 @@ export namespace GmailMapping {
     const unread = labelIds.has("UNREAD")
     const starred = labelIds.has("STARRED")
 
-    // Check for attachments
+    // Check for attachments (may not be available with metadata-only format)
     const hasAttachments = messages.some((msg) => {
+      // Only check if payload has parts (full format)
+      if (!msg.payload?.parts) return false
       const parsed = Mime.parsePayload(msg.payload)
       return parsed.attachments.length > 0
     })

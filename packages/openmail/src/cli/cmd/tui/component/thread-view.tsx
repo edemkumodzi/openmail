@@ -5,11 +5,23 @@ import { type Theme } from "../theme.js"
 import { formatFileSize } from "../util.js"
 import { EmptyBorder } from "./border.js"
 
+export interface ThreadViewHandle {
+  scrollDown: () => void
+  scrollUp: () => void
+  jumpToNextMessage: () => void
+  jumpToPrevMessage: () => void
+  getSelectedMessageIndex: () => number
+}
+
 interface ThreadViewProps {
   theme: Theme
   thread: Mail.ThreadDetail
   selectedMessageIndex: number
+  onSelectedMessageChange?: (index: number) => void
+  ref?: (handle: ThreadViewHandle) => void
 }
+
+const SCROLL_STEP = 2
 
 export function ThreadView(props: ThreadViewProps) {
   const t = () => props.theme
@@ -20,36 +32,130 @@ export function ThreadView(props: ThreadViewProps) {
     ", " +
     date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
 
-  // Auto-scroll to keep selected message visible
-  createEffect(on(() => props.selectedMessageIndex, (index) => {
+  // Get message boxes from the scrollbox content
+  const getMessageBoxes = (): any[] | null => {
+    if (!scrollboxRef) return null
+    const children = scrollboxRef.content.getChildren()
+    const wrapper = children[0]
+    if (!wrapper) return null
+    return (wrapper as any).getChildren?.() ?? null
+  }
+
+  // Determine which message is most visible at the current scroll position
+  const getVisibleMessageIndex = (): number => {
+    const boxes = getMessageBoxes()
+    if (!boxes || boxes.length === 0) return 0
+    if (!scrollboxRef) return 0
+
+    const scrollTop = scrollboxRef.scrollTop
+    const viewportMid = scrollTop + scrollboxRef.viewport.height / 2
+
+    // Find the message whose vertical center is closest to the viewport center
+    let bestIdx = 0
+    let bestDist = Infinity
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i]
+      const y = box.y as number
+      const h = box.height as number
+      const mid = y + h / 2
+      const dist = Math.abs(mid - viewportMid)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestIdx = i
+      }
+    }
+    return bestIdx
+  }
+
+  // Update selected message based on scroll position
+  const syncSelectedMessage = () => {
+    const idx = getVisibleMessageIndex()
+    if (idx !== props.selectedMessageIndex) {
+      props.onSelectedMessageChange?.(idx)
+    }
+  }
+
+  // Scroll down by SCROLL_STEP lines, advancing to next message at bottom boundary
+  const scrollDown = () => {
     if (!scrollboxRef) return
-    // Defer to next frame so layout is computed
+    const maxScroll = scrollboxRef.scrollHeight - scrollboxRef.viewport.height
+    if (maxScroll <= 0) return
+
+    const newTop = Math.min(scrollboxRef.scrollTop + SCROLL_STEP, maxScroll)
+    scrollboxRef.scrollTo(newTop)
+
+    // Defer sync so layout catches up
+    setTimeout(syncSelectedMessage, 16)
+  }
+
+  // Scroll up by SCROLL_STEP lines, moving to prev message at top boundary
+  const scrollUp = () => {
+    if (!scrollboxRef) return
+    const newTop = Math.max(scrollboxRef.scrollTop - SCROLL_STEP, 0)
+    scrollboxRef.scrollTo(newTop)
+
+    setTimeout(syncSelectedMessage, 16)
+  }
+
+  // Jump directly to the next message (scroll its top into view)
+  const jumpToNextMessage = () => {
+    if (!scrollboxRef) return
+    const boxes = getMessageBoxes()
+    if (!boxes) return
+    const nextIdx = Math.min(props.selectedMessageIndex + 1, boxes.length - 1)
+    scrollToMessage(nextIdx)
+    props.onSelectedMessageChange?.(nextIdx)
+  }
+
+  // Jump directly to the previous message (scroll its top into view)
+  const jumpToPrevMessage = () => {
+    if (!scrollboxRef) return
+    const prevIdx = Math.max(props.selectedMessageIndex - 1, 0)
+    scrollToMessage(prevIdx)
+    props.onSelectedMessageChange?.(prevIdx)
+  }
+
+  const scrollToMessage = (index: number) => {
+    if (!scrollboxRef) return
     setTimeout(() => {
       if (!scrollboxRef) return
-      const children = scrollboxRef.content.getChildren()
-      // Children are inside a column box wrapper; get message boxes from it
-      const wrapper = children[0]
-      if (!wrapper) return
-      const messageBoxes = (wrapper as any).getChildren?.()
-      if (!messageBoxes || index >= messageBoxes.length) return
+      const boxes = getMessageBoxes()
+      if (!boxes || index >= boxes.length) return
 
-      const target = messageBoxes[index]
+      const target = boxes[index]
       if (!target) return
 
       const targetY = target.y as number
       const targetHeight = target.height as number
       const viewportHeight = scrollboxRef.viewport.height
 
-      // Scroll so the target message is visible with some padding
       const currentScroll = scrollboxRef.scrollTop
       if (targetY < currentScroll) {
-        // Message is above viewport — scroll up to it
         scrollboxRef.scrollTo(Math.max(0, targetY - 1))
       } else if (targetY + targetHeight > currentScroll + viewportHeight) {
-        // Message is below viewport — scroll down so it fits
-        scrollboxRef.scrollTo(targetY + targetHeight - viewportHeight + 1)
+        // If message fits in viewport, show its top; otherwise scroll to top of message
+        if (targetHeight <= viewportHeight) {
+          scrollboxRef.scrollTo(targetY + targetHeight - viewportHeight + 1)
+        } else {
+          scrollboxRef.scrollTo(Math.max(0, targetY - 1))
+        }
       }
     }, 16)
+  }
+
+  // Expose handle to parent via ref callback
+  const handle: ThreadViewHandle = {
+    scrollDown,
+    scrollUp,
+    jumpToNextMessage,
+    jumpToPrevMessage,
+    getSelectedMessageIndex: () => props.selectedMessageIndex,
+  }
+  props.ref?.(handle)
+
+  // When selectedMessageIndex changes externally (e.g., from jump), scroll to it
+  createEffect(on(() => props.selectedMessageIndex, (index) => {
+    scrollToMessage(index)
   }))
 
   return (
@@ -82,10 +188,17 @@ export function ThreadView(props: ThreadViewProps) {
                   <text fg={t().textMuted} flexShrink={0} wrapMode="none">{formatDate(message.time)}</text>
                 </box>
 
-                {/* Recipients */}
-                <text fg={t().textMuted} wrapMode="none" overflow="hidden">
-                  to {message.to.map((p) => p.name || p.email).join(", ")}
-                </text>
+                {/* Recipients + link count */}
+                <box flexDirection="row" justifyContent="space-between" gap={1}>
+                  <text fg={t().textMuted} wrapMode="none" overflow="hidden">
+                    to {message.to.map((p) => p.name || p.email).join(", ")}
+                  </text>
+                  <Show when={message.body.links && message.body.links.length > 0}>
+                    <text fg={t().textMuted} flexShrink={0} wrapMode="none">
+                      {message.body.links!.length} {message.body.links!.length === 1 ? "link" : "links"}
+                    </text>
+                  </Show>
+                </box>
 
                 {/* Body */}
                 <box paddingTop={1}>

@@ -8,9 +8,20 @@
 import type { gmail_v1 } from "googleapis"
 
 export namespace Mime {
+  export interface ExtractedLink {
+    label: string
+    url: string
+  }
+
+  export interface StrippedHtml {
+    text: string
+    links: ExtractedLink[]
+  }
+
   export interface ParsedBody {
     text: string
     html?: string
+    links: ExtractedLink[]
   }
 
   export interface ParsedAttachment {
@@ -31,7 +42,7 @@ export namespace Mime {
    */
   export function parsePayload(payload: gmail_v1.Schema$MessagePart | undefined): ParsedMessage {
     if (!payload) {
-      return { body: { text: "" }, attachments: [], hasCalendarInvite: false }
+      return { body: { text: "", links: [] }, attachments: [], hasCalendarInvite: false }
     }
 
     const parts: gmail_v1.Schema$MessagePart[] = []
@@ -86,11 +97,20 @@ export namespace Mime {
     }
 
     // If we only have HTML, generate a basic text version
+    let links: ExtractedLink[] = []
     if (!text && html) {
-      text = stripHtml(html)
+      const stripped = stripHtml(html)
+      text = stripped.text
+      links = stripped.links
+    } else if (html) {
+      // Even if we have text/plain, extract links from HTML
+      const stripped = stripHtml(html)
+      links = stripped.links
+      // Clean bare URLs from text/plain that are now in the links popup
+      text = cleanTextWithLinks(text, links)
     }
 
-    return { body: { text, html }, attachments, hasCalendarInvite }
+    return { body: { text, html, links }, attachments, hasCalendarInvite }
   }
 
   /**
@@ -186,11 +206,18 @@ export namespace Mime {
 
   /**
    * Convert HTML email to readable plain text.
-   * Handles real-world HTML emails: removes style/script blocks,
-   * converts block elements to newlines, decodes entities.
+   *
+   * Strategy:
+   * - Remove style/script/head blocks entirely
+   * - Convert block elements to newlines
+   * - Links: show only the link text inline (no footnote references)
+   *   and collect all links into a separate array for the links popup
+   * - <hr> becomes a clean separator
+   * - Aggressive whitespace cleanup
    */
-  export function stripHtml(html: string): string {
+  export function stripHtml(html: string): StrippedHtml {
     let text = html
+    const links: ExtractedLink[] = []
 
     // Remove entire <head>, <style>, <script> blocks (content included)
     text = text.replace(/<head[\s>][\s\S]*?<\/head>/gi, "")
@@ -199,6 +226,9 @@ export namespace Mime {
 
     // Remove HTML comments
     text = text.replace(/<!--[\s\S]*?-->/g, "")
+
+    // Remove hidden elements (display:none, visibility:hidden, etc.)
+    text = text.replace(/<[^>]+(?:display\s*:\s*none|visibility\s*:\s*hidden)[^>]*>[\s\S]*?<\/[^>]+>/gi, "")
 
     // Convert <br> to newlines
     text = text.replace(/<br\s*\/?>/gi, "\n")
@@ -210,22 +240,114 @@ export namespace Mime {
     text = text.replace(/<\/li>/gi, "\n")
     text = text.replace(/<\/h[1-6]>/gi, "\n\n")
     text = text.replace(/<\/blockquote>/gi, "\n")
-    text = text.replace(/<hr\s*\/?>/gi, "\n---\n")
+    text = text.replace(/<hr\s*\/?>/gi, "\n\u2500\u2500\u2500\n")
+
+    // Table elements: cells get a separator, tables get block newlines
+    text = text.replace(/<\/td>/gi, "  ")
+    text = text.replace(/<\/th>/gi, "  ")
+    text = text.replace(/<\/table>/gi, "\n")
 
     // List items get a bullet
     text = text.replace(/<li[^>]*>/gi, "  \u2022 ")
 
-    // Links: extract href text
-    text = text.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, content) => {
+    // Links: show text inline, collect URL silently
+    text = text.replace(/<a[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, content: string) => {
       const linkText = content.replace(/<[^>]+>/g, "").trim()
-      if (!linkText || linkText === href) return href
-      return `${linkText} (${href})`
+      const url = decodeHtmlEntities(href.trim())
+
+      // Skip empty/javascript/anchor links — just show the text
+      if (!url || url.startsWith("javascript:") || url.startsWith("#")) {
+        return linkText || ""
+      }
+
+      // Collect the link silently
+      const cleanedUrl = cleanUrl(url)
+      if (linkText && !isUrlLike(linkText)) {
+        // Named link: show link text, collect with label
+        links.push({ label: linkText, url: cleanedUrl })
+        return linkText
+      }
+
+      // URL-only link: collect silently, show nothing inline
+      // (the link popup provides access to these)
+      try {
+        const parsed = new URL(url)
+        const domain = parsed.hostname.replace(/^www\./, "")
+        links.push({ label: domain, url: cleanedUrl })
+        return ""
+      } catch {
+        links.push({ label: truncateUrl(url, 40), url: cleanedUrl })
+        return ""
+      }
+    })
+
+    // Remove image tags but note alt text if meaningful
+    text = text.replace(/<img[^>]*alt=["']([^"']+)["'][^>]*\/?>/gi, (_, alt: string) => {
+      const trimmed = alt.trim()
+      // Skip generic alt text
+      if (!trimmed || /^(image|photo|logo|icon|banner|spacer|pixel|img|\s)$/i.test(trimmed)) return ""
+      return trimmed
     })
 
     // Remove all remaining HTML tags
     text = text.replace(/<[^>]+>/g, "")
 
     // Decode HTML entities
+    text = decodeHtmlEntities(text)
+
+    // Clean up whitespace
+    text = text.replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, " ")   // non-breaking/zero-width spaces → regular space
+    text = text.replace(/[ \t]+/g, " ")          // collapse horizontal whitespace
+    text = text.replace(/^ +| +$/gm, "")         // trim each line
+    text = text.replace(/\n{3,}/g, "\n\n")        // max 2 consecutive newlines
+
+    text = text.trim()
+
+    return { text, links }
+  }
+
+  /**
+   * Clean bare URLs from text/plain email body when we have
+   * extracted links from the HTML version. Handles:
+   * - Standalone lines that are just URLs
+   * - URLs in angle brackets: <https://...>
+   * - Parenthesized URLs: "Click here (https://...)" — including multi-line
+   * - Bare inline URLs within text
+   */
+  export function cleanTextWithLinks(text: string, links: ExtractedLink[]): string {
+    if (links.length === 0) return text
+
+    let result = text
+
+    // 1. Remove parenthesized URLs — these can span multiple lines in text/plain
+    //    e.g. "LinkedIn (https://d5kNrC04.na1.hubspotlinks.com/Ctc/DQ+113/...\n...long-url )"
+    //    The regex matches "(https://..." followed by any chars (including newlines) up to " )" or ")"
+    result = result.replace(/\s*\(\s*https?:\/\/[^\s)][^)]*\)/g, "")
+
+    // 2. Remove angle-bracketed URLs: <https://...>
+    result = result.replace(/\s*<\s*https?:\/\/\S+\s*>/g, "")
+
+    // 3. Remove standalone lines that are just a bare URL
+    result = result.replace(/^[ \t]*https?:\/\/\S+[ \t]*$/gm, "")
+
+    // 4. Remove inline bare URLs (not in parens/brackets) that remain in text
+    //    Only remove if they look like tracking/long URLs (40+ chars) to avoid
+    //    removing short meaningful URLs like "visit https://example.com"
+    result = result.replace(/https?:\/\/\S{40,}/g, "")
+
+    // Clean up whitespace artifacts
+    result = result.replace(/[ \t]+$/gm, "")         // trailing spaces on lines
+    result = result.replace(/^ +/gm, (m) => m)       // preserve leading spaces (indentation)
+    result = result.replace(/\n{3,}/g, "\n\n")        // max 2 consecutive newlines
+    result = result.replace(/[ \t]{2,}/g, " ")        // collapse multiple spaces mid-line
+
+    return result.trim()
+  }
+
+  /**
+   * Decode common HTML entities.
+   */
+  function decodeHtmlEntities(text: string): string {
     text = text.replace(/&amp;/g, "&")
     text = text.replace(/&lt;/g, "<")
     text = text.replace(/&gt;/g, ">")
@@ -233,14 +355,82 @@ export namespace Mime {
     text = text.replace(/&#0?39;/g, "'")
     text = text.replace(/&apos;/g, "'")
     text = text.replace(/&nbsp;/g, " ")
+    text = text.replace(/&copy;/gi, "\u00A9")
+    text = text.replace(/&mdash;/gi, "\u2014")
+    text = text.replace(/&ndash;/gi, "\u2013")
+    text = text.replace(/&bull;/gi, "\u2022")
+    text = text.replace(/&hellip;/gi, "\u2026")
+    text = text.replace(/&laquo;/gi, "\u00AB")
+    text = text.replace(/&raquo;/gi, "\u00BB")
+    text = text.replace(/&trade;/gi, "\u2122")
+    text = text.replace(/&reg;/gi, "\u00AE")
     text = text.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
-    text = text.replace(/&[a-zA-Z]+;/g, " ") // remaining entities → space
+    text = text.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    text = text.replace(/&[a-zA-Z]+;/g, " ") // remaining unknown entities → space
+    return text
+  }
 
-    // Clean up whitespace
-    text = text.replace(/[ \t]+/g, " ")          // collapse horizontal whitespace
-    text = text.replace(/^ +| +$/gm, "")         // trim each line
-    text = text.replace(/\n{3,}/g, "\n\n")        // max 2 consecutive newlines
+  /**
+   * Check if a string looks like a URL.
+   */
+  function isUrlLike(text: string): boolean {
+    return /^https?:\/\//i.test(text) || text.includes("www.")
+  }
 
-    return text.trim()
+  /**
+   * Clean a URL by removing tracking parameters but keeping full path/length.
+   */
+  function cleanUrl(url: string): string {
+    try {
+      const parsed = new URL(url)
+      const cleanParams = new URLSearchParams()
+      let hasCleanParams = false
+      for (const [key] of parsed.searchParams) {
+        if (/^(utm_|ref|trk|mid|eid|sid|fbclid|gclid|mc_|_hsenc|_hsmi|token|tracking|click|redirect|lipi|lgCta|lgTemp|midToken|midSig|scp|scn|stId)/i.test(key)) {
+          continue
+        }
+        cleanParams.set(key, parsed.searchParams.get(key)!)
+        hasCleanParams = true
+      }
+      const cleanQuery = hasCleanParams ? `?${cleanParams}` : ""
+      return `${parsed.origin}${parsed.pathname}${cleanQuery}`
+    } catch {
+      return url
+    }
+  }
+
+  /**
+   * Truncate a URL for display. Removes tracking parameters and
+   * limits total length.
+   */
+  export function truncateUrl(url: string, maxLen: number = 60): string {
+    try {
+      const parsed = new URL(url)
+      // Strip known tracking params
+      const cleanParams = new URLSearchParams()
+      let hasCleanParams = false
+      for (const [key] of parsed.searchParams) {
+        // Skip common tracking parameters
+        if (/^(utm_|ref|trk|mid|eid|sid|fbclid|gclid|mc_|_hsenc|_hsmi|token|tracking|click|redirect|lipi|lgCta|lgTemp|midToken|midSig|scp|scn|stId)/i.test(key)) {
+          continue
+        }
+        cleanParams.set(key, parsed.searchParams.get(key)!)
+        hasCleanParams = true
+      }
+      const cleanQuery = hasCleanParams ? `?${cleanParams}` : ""
+      const clean = `${parsed.origin}${parsed.pathname}${cleanQuery}`
+
+      if (clean.length <= maxLen) return clean
+      // Truncate path, keep domain visible
+      const domain = parsed.origin
+      const remaining = maxLen - domain.length - 3 // for "..."
+      if (remaining <= 0) return domain.slice(0, maxLen - 3) + "..."
+      const path = parsed.pathname + cleanQuery
+      return domain + path.slice(0, remaining) + "..."
+    } catch {
+      // Not a valid URL, just truncate
+      if (url.length <= maxLen) return url
+      return url.slice(0, maxLen - 3) + "..."
+    }
   }
 }

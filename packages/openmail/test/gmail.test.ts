@@ -236,24 +236,27 @@ describe("Mime — stripHtml", () => {
   test("strips style and script blocks", () => {
     const html = `<html><head><style>body { color: red; }</style></head><body><p>Hello</p></body></html>`
     const result = Mime.stripHtml(html)
-    expect(result).toBe("Hello")
-    expect(result).not.toContain("color")
-    expect(result).not.toContain("style")
+    expect(result.text).toBe("Hello")
+    expect(result.text).not.toContain("color")
+    expect(result.text).not.toContain("style")
+    expect(result.links).toEqual([])
   })
 
-  test("preserves link text and href", () => {
+  test("named links show text inline and collect URL in links array", () => {
     const html = `<p>Click <a href="https://example.com">here</a> to visit</p>`
     const result = Mime.stripHtml(html)
-    expect(result).toContain("here")
-    expect(result).toContain("https://example.com")
+    expect(result.text).toContain("here")
+    expect(result.text).toContain("to visit")
+    expect(result.text).not.toContain("https://example.com")
+    expect(result.links).toEqual([{ label: "here", url: "https://example.com/" }])
   })
 
   test("converts block elements to newlines", () => {
     const html = `<div>Line 1</div><div>Line 2</div><p>Paragraph</p>`
     const result = Mime.stripHtml(html)
-    expect(result).toContain("Line 1")
-    expect(result).toContain("Line 2")
-    expect(result).toContain("Paragraph")
+    expect(result.text).toContain("Line 1")
+    expect(result.text).toContain("Line 2")
+    expect(result.text).toContain("Paragraph")
   })
 
   test("handles complex real-world HTML email", () => {
@@ -277,40 +280,72 @@ describe("Mime — stripHtml", () => {
       </html>
     `
     const result = Mime.stripHtml(html)
-    expect(result).toContain("Newsletter")
-    expect(result).toContain("Dear subscriber")
-    expect(result).toContain("weekly update")
-    expect(result).toContain("Item one")
-    expect(result).toContain("Item two")
-    expect(result).toContain("Best,")
-    expect(result).toContain("The Team")
-    expect(result).not.toContain("max-width")
-    expect(result).not.toContain("class=")
-    expect(result.length).toBeGreaterThan(20)
+    expect(result.text).toContain("Newsletter")
+    expect(result.text).toContain("Dear subscriber")
+    expect(result.text).toContain("weekly update")
+    expect(result.text).toContain("Item one")
+    expect(result.text).toContain("Item two")
+    expect(result.text).toContain("Best,")
+    expect(result.text).toContain("The Team")
+    expect(result.text).not.toContain("max-width")
+    expect(result.text).not.toContain("class=")
+    expect(result.text.length).toBeGreaterThan(20)
   })
 
   test("decodes HTML entities", () => {
     const html = `<p>Price: &lt;$100&gt; &amp; &quot;free&quot; isn&#39;t real</p>`
     const result = Mime.stripHtml(html)
-    expect(result).toContain("<$100>")
-    expect(result).toContain('& "free"')
-    expect(result).toContain("isn't")
+    expect(result.text).toContain("<$100>")
+    expect(result.text).toContain('& "free"')
+    expect(result.text).toContain("isn't")
   })
 
   test("removes HTML comments", () => {
     const html = `<p>Visible</p><!-- hidden comment --><p>Also visible</p>`
     const result = Mime.stripHtml(html)
-    expect(result).toContain("Visible")
-    expect(result).toContain("Also visible")
-    expect(result).not.toContain("hidden comment")
+    expect(result.text).toContain("Visible")
+    expect(result.text).toContain("Also visible")
+    expect(result.text).not.toContain("hidden comment")
   })
 
   test("converts hr to separator", () => {
     const html = `<p>Above</p><hr><p>Below</p>`
     const result = Mime.stripHtml(html)
-    expect(result).toContain("Above")
-    expect(result).toContain("---")
-    expect(result).toContain("Below")
+    expect(result.text).toContain("Above")
+    expect(result.text).toContain("\u2500\u2500\u2500")
+    expect(result.text).toContain("Below")
+  })
+
+  test("cleans tracking params from link URLs", () => {
+    const html = `<a href="https://www.linkedin.com/comm/jobs/view/12345?trackingId=abc123&refId=xyz&trk=long-tracking">View Job</a>`
+    const result = Mime.stripHtml(html)
+    // Should show link text inline
+    expect(result.text).toContain("View Job")
+    // Links array should have cleaned URL
+    expect(result.links.length).toBe(1)
+    expect(result.links[0].label).toBe("View Job")
+    expect(result.links[0].url).not.toContain("trackingId=")
+    expect(result.links[0].url).not.toContain("trk=")
+  })
+
+  test("URL-only links are collected silently without inline text", () => {
+    const html = `<a href="https://example.com/very/long/path/that/goes/on/and/on/and/on/forever">https://example.com/very/long/path/that/goes/on/and/on/and/on/forever</a>`
+    const result = Mime.stripHtml(html)
+    // URL-only links should not leave inline text clutter
+    expect(result.text.trim()).toBe("")
+    // But should be collected in links array
+    expect(result.links.length).toBe(1)
+    expect(result.links[0].url).toContain("example.com")
+  })
+
+  test("multiple links are collected in order", () => {
+    const html = `<p><a href="https://a.com">First</a> and <a href="https://b.com">Second</a></p>`
+    const result = Mime.stripHtml(html)
+    expect(result.text).toContain("First")
+    expect(result.text).toContain("Second")
+    expect(result.links.length).toBe(2)
+    expect(result.links[0]).toEqual({ label: "First", url: "https://a.com/" })
+    expect(result.links[1]).toEqual({ label: "Second", url: "https://b.com/" })
   })
 })
 

@@ -4,6 +4,8 @@ import { Server } from "../src/server/server.js"
 import { Cache } from "../src/cache/index.js"
 import * as schema from "../src/cache/schema.js"
 import { EventBus } from "../src/bus/index.js"
+import { ProviderRegistry } from "../src/provider/registry.js"
+import { MailProvider } from "../src/provider/types.js"
 import { unlinkSync, existsSync } from "node:fs"
 
 const TEST_DB = "/tmp/openmail-client-test.db"
@@ -12,9 +14,38 @@ const TEST_PORT = 14590 // Use a unique port to avoid conflicts
 function cleanDb() {
   Cache.close()
   EventBus.clear()
+  ProviderRegistry.clear()
   for (const suffix of ["", "-wal", "-shm"]) {
     const path = TEST_DB + suffix
     if (existsSync(path)) unlinkSync(path)
+  }
+}
+
+function createMockProvider(): MailProvider.Plugin & MailProvider.Labelable {
+  const noop = async () => {}
+  return {
+    info: { id: "gmail", name: "Gmail (mock)", capabilities: ["threads", "labels"] },
+    auth: async () => ({ accountId: "", email: "", name: "", accessToken: "", refreshToken: "", expiresAt: new Date() }),
+    disconnect: noop,
+    list: async () => ({ items: [], hasMore: false }),
+    getThread: async (id: string) => ({
+      id, accountId: "acc-1", subject: "Test", snippet: "",
+      participants: [], messageCount: 0, hasAttachments: false,
+      folders: [], labels: [], unread: false, starred: false,
+      time: new Date(), linkedEventIds: [], messages: [],
+    }),
+    getMessage: async () => ({
+      id: "m-1", threadId: "t-1", from: { name: "", email: "" },
+      to: [], cc: [], bcc: [], replyTo: null, subject: "", body: { text: "" },
+      attachments: [], calendarEvents: [], time: new Date(), unread: false,
+    }),
+    send: async () => ({ id: "sent-1" }),
+    reply: async () => ({ id: "reply-1" }),
+    archive: noop, trash: noop, markRead: noop, markUnread: noop,
+    star: noop, unstar: noop, listFolders: async () => [],
+    moveToFolder: noop,
+    listLabels: async () => [], createLabel: async (name: string) => ({ id: name, name }),
+    deleteLabel: noop, addLabel: noop, removeLabel: noop,
   }
 }
 
@@ -69,6 +100,7 @@ describe("MailClient — integration with real server", () => {
     Cache.init(TEST_DB)
     seedData()
 
+    ProviderRegistry.register(createMockProvider())
     const result = Server.start(TEST_PORT)
     serverStop = result.stop
 
@@ -149,14 +181,19 @@ describe("MailClient — integration with real server", () => {
     expect(state!.status).toBe("idle")
   })
 
-  test("action endpoints return success", async () => {
-    // These are stubs for now, but the client should handle them
+  test("action endpoints work end-to-end", async () => {
     expect(await MailClient.archiveThread("t-1")).toBe(true)
-    expect(await MailClient.trashThread("t-1")).toBe(true)
     expect(await MailClient.starThread("t-1")).toBe(true)
     expect(await MailClient.unstarThread("t-1")).toBe(true)
     expect(await MailClient.markRead("t-1")).toBe(true)
     expect(await MailClient.markUnread("t-1")).toBe(true)
+    // Trash last since it removes folder links
+    expect(await MailClient.trashThread("t-1")).toBe(true)
+  })
+
+  test("label actions work end-to-end", async () => {
+    expect(await MailClient.addLabel("t-1", "l-work")).toBe(true)
+    expect(await MailClient.removeLabel("t-1", "l-work")).toBe(true)
   })
 })
 

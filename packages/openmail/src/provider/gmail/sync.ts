@@ -68,11 +68,18 @@ export namespace GmailSync {
         pageToken,
       })
 
-      // threads.list returns minimal data — we need to fetch full threads
-      for (const thread of res.threads) {
-        if (thread.id) {
-          const full = await GmailApi.getThread(client, thread.id, "full")
-          allThreads.push(full)
+      // threads.list returns minimal data — fetch metadata in parallel batches
+      const threadIds = res.threads.map((t) => t.id).filter(Boolean) as string[]
+      const BATCH_SIZE = 10
+      for (let i = 0; i < threadIds.length; i += BATCH_SIZE) {
+        const batch = threadIds.slice(i, i + BATCH_SIZE)
+        const results = await Promise.allSettled(
+          batch.map((id) => GmailApi.getThread(client, id, "metadata"))
+        )
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            allThreads.push(result.value)
+          }
         }
       }
 

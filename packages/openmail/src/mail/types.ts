@@ -1,4 +1,9 @@
 export namespace Mail {
+  export interface ExtractedLink {
+    label: string
+    url: string
+  }
+
   export interface Participant {
     name: string
     email: string
@@ -33,7 +38,7 @@ export namespace Mail {
     bcc?: Participant[]
     replyTo?: Participant | null
     subject: string
-    body: { text: string; html?: string }
+    body: { text: string; html?: string; links?: ExtractedLink[] }
     attachments: Attachment[]
     calendarEvent?: CalEvent
     time: Date
