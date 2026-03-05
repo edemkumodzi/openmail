@@ -6,6 +6,7 @@ export namespace Mail {
 
   export interface ThreadSummary {
     id: string
+    accountId?: string
     subject: string
     snippet: string
     participants: Participant[]
@@ -29,12 +30,16 @@ export namespace Mail {
     from: Participant
     to: Participant[]
     cc: Participant[]
+    bcc?: Participant[]
+    replyTo?: Participant | null
     subject: string
     body: { text: string; html?: string }
     attachments: Attachment[]
     calendarEvent?: CalEvent
     time: Date
     unread: boolean
+    messageIdHeader?: string
+    inReplyTo?: string
   }
 
   export interface Attachment {
@@ -42,6 +47,29 @@ export namespace Mail {
     filename: string
     mimeType: string
     size: number
+  }
+
+  export interface OutgoingAttachment {
+    filename: string
+    mimeType: string
+    content: Uint8Array
+  }
+
+  export interface OutgoingMessage {
+    to: Participant[]
+    cc?: Participant[]
+    bcc?: Participant[]
+    subject: string
+    body: { text: string; html?: string }
+    attachments?: OutgoingAttachment[]
+    inReplyTo?: string // Message-ID header for threading
+  }
+
+  export interface Draft {
+    id: string
+    message: OutgoingMessage
+    threadId?: string
+    updatedAt: Date
   }
 
   export interface Folder {
@@ -57,8 +85,20 @@ export namespace Mail {
     color: string
   }
 
+  export interface Calendar {
+    id: string
+    accountId: string
+    name: string
+    color?: string
+    source: "google" | "caldav" | "ics"
+    writable: boolean
+  }
+
   export interface CalEvent {
     id: string
+    calendarId?: string
+    accountId?: string
+    uid?: string
     summary: string
     description?: string
     location?: string
@@ -68,7 +108,9 @@ export namespace Mail {
     organizer: Participant
     attendees: CalAttendee[]
     myStatus: "accepted" | "tentative" | "declined" | "needs-action" | null
+    recurrence?: string
     conferenceUrl?: string
+    source?: "api" | "ics"
     linkedThreadIds: string[]
   }
 
@@ -76,5 +118,48 @@ export namespace Mail {
     participant: Participant
     status: "accepted" | "tentative" | "declined" | "needs-action"
     role: "required" | "optional"
+  }
+
+  // Pagination helper
+  export interface Paginated<T> {
+    items: T[]
+    nextCursor?: string
+    hasMore: boolean
+  }
+
+  // Auth result from provider
+  export interface AuthResult {
+    accountId: string
+    email: string
+    name: string
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: Date
+  }
+
+  // Sync result from provider
+  export interface SyncResult {
+    newCursor: string
+    threads: ThreadSummary[]
+    deletedThreadIds: string[]
+    hasMore: boolean
+  }
+
+  // Push event from provider
+  export interface PushEvent {
+    type: "new_message" | "thread_updated" | "thread_deleted"
+    threadId: string
+    messageId?: string
+  }
+
+  // Push subscription handle
+  export interface PushSubscription {
+    unsubscribe(): Promise<void>
+  }
+
+  // Date range for calendar queries
+  export interface DateRange {
+    start: Date
+    end: Date
   }
 }

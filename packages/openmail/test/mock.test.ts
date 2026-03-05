@@ -9,11 +9,11 @@ describe("mock data shape validation", () => {
 
     test("has required system folders", () => {
       const folderIds = MockData.folders.map((f) => f.id)
-      expect(folderIds).toContain("INBOX")
-      expect(folderIds).toContain("SENT")
-      expect(folderIds).toContain("DRAFTS")
-      expect(folderIds).toContain("TRASH")
-      expect(folderIds).toContain("SPAM")
+      expect(folderIds).toContain("folder:INBOX")
+      expect(folderIds).toContain("folder:SENT")
+      expect(folderIds).toContain("folder:DRAFTS")
+      expect(folderIds).toContain("folder:TRASH")
+      expect(folderIds).toContain("folder:SPAM")
     })
 
     test("every folder has an id and name", () => {

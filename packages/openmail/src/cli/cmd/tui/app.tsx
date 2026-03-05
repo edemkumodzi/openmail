@@ -1,9 +1,10 @@
-import { createMemo, Show, Switch, Match } from "solid-js"
+import { createMemo, createSignal, createEffect, on, onMount, onCleanup, Show, Switch, Match } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useKeyboard, useTerminalDimensions, useRenderer } from "@opentui/solid"
 import { TextAttributes } from "@opentui/core"
 import { Mail } from "../../../mail/types.js"
 import { MockData } from "../../../mail/mock.js"
+import { MailClient } from "../../../client/index.js"
 import { createTheme } from "./theme.js"
 import { SettingsManager } from "./settings.js"
 import { EmptyBorder } from "./component/border.js"
@@ -49,7 +50,7 @@ export function App() {
     view: "inbox",
     previousView: "inbox",
     focus: "threads",
-    activeFolder: "INBOX",
+    activeFolder: "folder:INBOX",
     activeLabel: null,
     selectedSidebarIndex: 0,
     selectedThreadIndex: 0,
@@ -66,10 +67,96 @@ export function App() {
     selectedMessageIndex: 0,
   })
 
-  const allThreads = () => MockData.threads
-  const folders = () => MockData.folders
-  const labels = () => MockData.labels
-  const events = () => MockData.events
+  // Data sources — populated from server or fallback to mock data
+  const [allThreads, setAllThreads] = createSignal<Mail.ThreadSummary[]>(MockData.threads)
+  const [folders, setFolders] = createSignal<Mail.Folder[]>(MockData.folders)
+  const [labels, setLabels] = createSignal<Mail.Label[]>(MockData.labels)
+  const [events, setEvents] = createSignal<Mail.CalEvent[]>(MockData.events)
+  const [serverConnected, setServerConnected] = createSignal(false)
+  const [syncStatus, setSyncStatus] = createSignal<"synced" | "syncing" | "offline" | "error">("offline")
+  const [accountEmail, setAccountEmail] = createSignal(MockData.me.email)
+
+  // Fetch threads from server with current folder/label filter
+  const fetchThreads = async () => {
+    if (!serverConnected()) return
+    try {
+      const opts: { folderId?: string; labelId?: string } = {}
+      // When filtering by label, don't also filter by folder (show label across all folders)
+      if (state.activeLabel) {
+        opts.labelId = state.activeLabel
+      } else if (state.activeFolder) {
+        opts.folderId = state.activeFolder
+      }
+      const result = await MailClient.listThreads(opts)
+      setAllThreads(result.items)
+    } catch {
+      // keep current data on error
+    }
+  }
+
+  // Try to connect to server and load data
+  onMount(async () => {
+    try {
+      const port = (globalThis as any).__openmail_server_port ?? 4580
+      const bootEmail = (globalThis as any).__openmail_account_email
+      if (bootEmail) setAccountEmail(bootEmail)
+
+      MailClient.init({ baseUrl: `http://localhost:${port}` })
+      const ok = await MailClient.health()
+
+      if (ok) {
+        setServerConnected(true)
+        setSyncStatus("synced")
+
+        // Load folders, labels, accounts, and threads for active folder
+        const [folderResult, labelResult, accounts] = await Promise.all([
+          MailClient.listFolders().catch(() => null),
+          MailClient.listLabels().catch(() => null),
+          MailClient.listAccounts().catch(() => null),
+        ])
+
+        if (folderResult && folderResult.length > 0) setFolders(folderResult)
+        if (labelResult && labelResult.length > 0) setLabels(labelResult)
+        if (accounts && accounts.length > 0) setAccountEmail(accounts[0].email)
+
+        // Fetch threads for the default active folder
+        await fetchThreads()
+
+        // Subscribe to SSE for real-time updates
+        const unsubscribe = MailClient.subscribe((event) => {
+          // Re-fetch threads on relevant events
+          if (event.type.startsWith("thread.") || event.type.startsWith("message.") || event.type === "sync.completed") {
+            fetchThreads()
+          }
+          if (event.type.startsWith("folder.") || event.type === "sync.completed") {
+            MailClient.listFolders().then((r) => setFolders(r)).catch(() => {})
+          }
+          if (event.type.startsWith("label.") || event.type === "sync.completed") {
+            MailClient.listLabels().then((r) => setLabels(r)).catch(() => {})
+          }
+          if (event.type.startsWith("sync.")) {
+            if (event.type === "sync.started") setSyncStatus("syncing")
+            else if (event.type === "sync.completed") setSyncStatus("synced")
+            else if (event.type === "sync.error") setSyncStatus("error")
+          }
+        })
+
+        onCleanup(() => {
+          unsubscribe()
+          MailClient.disconnect()
+        })
+      }
+    } catch {
+      // Server not available — stay on mock data
+    }
+  })
+
+  // Re-fetch threads when folder or label filter changes
+  createEffect(on(
+    () => [state.activeFolder, state.activeLabel],
+    () => { fetchThreads() },
+    { defer: true }
+  ))
 
   // Sidebar items: folders + labels as one navigable list
   // The "Labels" header row is skipped during navigation
@@ -79,14 +166,8 @@ export function App() {
   const isFolderIndex = (idx: number) => idx < folders().length
   const labelIndexToLabel = (idx: number) => labels()[idx - labelStartIndex()]
 
-  // Filtered threads based on active folder + optional label filter
-  const threads = () => {
-    let result = allThreads()
-    if (state.activeLabel) {
-      result = result.filter((t) => t.labels.includes(state.activeLabel!))
-    }
-    return result
-  }
+  // Threads are already filtered server-side by active folder/label
+  const threads = () => allThreads()
 
   const settings = () => SettingsManager.get()
   // Responsive layout: auto-collapse panels if terminal is too narrow
@@ -113,7 +194,16 @@ export function App() {
     return selected?.id
   }
 
-  const openThread = (thread: Mail.ThreadSummary) => {
+  const openThread = async (thread: Mail.ThreadSummary) => {
+    // Try server first, then fall back to mock
+    if (serverConnected()) {
+      const detail = await MailClient.getThread(thread.id)
+      if (detail) {
+        setState({ view: "thread", previousView: state.view === "search" ? "search" : "thread", activeThread: detail, selectedMessageIndex: 0 })
+        return
+      }
+    }
+    // Fallback to mock data
     const detail = MockData.threadDetails[thread.id]
     if (detail) {
       setState({ view: "thread", previousView: state.view === "search" ? "search" : "thread", activeThread: detail, selectedMessageIndex: 0 })
@@ -658,7 +748,7 @@ export function App() {
       </box>
 
       {/* Keybind bar */}
-      <KeybindBar theme={theme()} hints={keybindHints()} email={MockData.me.email} syncStatus="synced" />
+      <KeybindBar theme={theme()} hints={keybindHints()} email={accountEmail()} syncStatus={syncStatus()} />
 
       {/* Settings overlay */}
       <Show when={state.view === "settings"}>

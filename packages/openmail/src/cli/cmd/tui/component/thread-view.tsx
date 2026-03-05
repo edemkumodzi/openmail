@@ -1,5 +1,5 @@
-import { For, Show } from "solid-js"
-import { TextAttributes } from "@opentui/core"
+import { For, Show, createEffect, on } from "solid-js"
+import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { Mail } from "../../../../mail/types.js"
 import { type Theme } from "../theme.js"
 import { formatFileSize } from "../util.js"
@@ -13,14 +13,47 @@ interface ThreadViewProps {
 
 export function ThreadView(props: ThreadViewProps) {
   const t = () => props.theme
+  let scrollboxRef: ScrollBoxRenderable | undefined
 
   const formatDate = (date: Date) =>
     date.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
     ", " +
     date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
 
+  // Auto-scroll to keep selected message visible
+  createEffect(on(() => props.selectedMessageIndex, (index) => {
+    if (!scrollboxRef) return
+    // Defer to next frame so layout is computed
+    setTimeout(() => {
+      if (!scrollboxRef) return
+      const children = scrollboxRef.content.getChildren()
+      // Children are inside a column box wrapper; get message boxes from it
+      const wrapper = children[0]
+      if (!wrapper) return
+      const messageBoxes = (wrapper as any).getChildren?.()
+      if (!messageBoxes || index >= messageBoxes.length) return
+
+      const target = messageBoxes[index]
+      if (!target) return
+
+      const targetY = target.y as number
+      const targetHeight = target.height as number
+      const viewportHeight = scrollboxRef.viewport.height
+
+      // Scroll so the target message is visible with some padding
+      const currentScroll = scrollboxRef.scrollTop
+      if (targetY < currentScroll) {
+        // Message is above viewport — scroll up to it
+        scrollboxRef.scrollTo(Math.max(0, targetY - 1))
+      } else if (targetY + targetHeight > currentScroll + viewportHeight) {
+        // Message is below viewport — scroll down so it fits
+        scrollboxRef.scrollTo(targetY + targetHeight - viewportHeight + 1)
+      }
+    }, 16)
+  }))
+
   return (
-    <scrollbox flexGrow={1} paddingLeft={2} paddingRight={2} scrollbarOptions={{ visible: false }}>
+    <scrollbox ref={scrollboxRef} flexGrow={1} paddingLeft={2} paddingRight={2} scrollbarOptions={{ visible: false }}>
       <box flexDirection="column">
         <For each={props.thread.messages}>
           {(message, index) => {
