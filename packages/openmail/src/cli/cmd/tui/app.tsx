@@ -59,7 +59,7 @@ export function App() {
     selectedSidebarIndex: 0,
     selectedThreadIndex: 0,
     activeThread: null,
-    showCalendar: true,
+    showCalendar: true, // legacy — no longer toggled, calendar auto-shows when space permits
     settingsSelectedIndex: 0,
     searchQuery: "",
     searchSelectedIndex: 0,
@@ -188,7 +188,6 @@ export function App() {
     return Math.min(sw, maxSidebar)
   }
   const calendarVisible = () => {
-    if (!state.showCalendar) return false
     // Auto-hide calendar if terminal too narrow for all 3 panels
     const remaining = dimensions().width - CHROME_WIDTH - sidebarWidth() - settings().calendarWidth
     return remaining >= MIN_EMAIL_WIDTH
@@ -411,7 +410,6 @@ export function App() {
         { key: "j/k", label: "navigate" },
         { key: "enter", label: "select" },
         { key: "tab", label: "threads" },
-        { key: "ctrl+b", label: "calendar" },
       ]
     }
     const hints: KeyHint[] = [
@@ -430,7 +428,6 @@ export function App() {
       { key: "/", label: "search" },
       { key: "c", label: "compose" },
       { key: ",", label: "settings" },
-      { key: "ctrl+b", label: "calendar" },
     )
     return hints
   })
@@ -658,13 +655,6 @@ export function App() {
         evt.preventDefault()
         return
       }
-      evt.preventDefault()
-      return
-    }
-
-    // Global: Ctrl+B toggle calendar
-    if (evt.ctrl && evt.name === "b") {
-      setState("showCalendar", !state.showCalendar)
       evt.preventDefault()
       return
     }
