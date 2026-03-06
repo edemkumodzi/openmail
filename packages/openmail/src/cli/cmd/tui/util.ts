@@ -57,8 +57,8 @@ export function truncate(str: string, maxLength: number): string {
   return str.slice(0, maxLength - 1) + "\u2026"
 }
 
-export function groupEventsByDay(events: Array<{ start: Date }>): Map<string, typeof events> {
-  const groups = new Map<string, typeof events>()
+export function groupEventsByDay<T extends { start: Date }>(events: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>()
   for (const event of events) {
     const key = event.start.toDateString()
     const list = groups.get(key) ?? []

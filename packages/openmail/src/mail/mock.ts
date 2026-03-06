@@ -11,7 +11,7 @@ export namespace MockData {
 
   export const folders: Mail.Folder[] = [
     { id: "folder:INBOX", name: "Inbox", type: "inbox", unreadCount: 3 },
-    { id: "folder:STARRED", name: "Starred", type: "custom", unreadCount: 0 },
+    { id: "folder:STARRED", name: "Starred", type: "starred", unreadCount: 0 },
     { id: "folder:SENT", name: "Sent", type: "sent", unreadCount: 0 },
     { id: "folder:DRAFTS", name: "Drafts", type: "drafts", unreadCount: 1 },
     { id: "folder:SPAM", name: "Spam", type: "spam", unreadCount: 0 },

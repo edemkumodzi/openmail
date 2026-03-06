@@ -47,48 +47,60 @@ export namespace GmailSync {
     client: ReturnType<typeof GmailApi.createClient>,
     opts: {
       maxThreads?: number
-      labelIds?: string[]
+      /** Each entry is a separate label query (OR semantics across entries). */
+      labelQueries?: string[][]
     } = {}
   ): Promise<FullSyncResult> {
     const maxThreads = opts.maxThreads ?? 200
-    const labelIds = opts.labelIds ?? ["INBOX"]
+    // Default: fetch INBOX, STARRED, and SENT as separate passes
+    const labelQueries = opts.labelQueries ?? [["INBOX"], ["STARRED"], ["SENT"]]
 
     // Get current profile for historyId
     const profile = await GmailApi.getProfile(client)
 
-    // Fetch threads (paginated)
-    const allThreads: gmail_v1.Schema$Thread[] = []
-    let pageToken: string | undefined
+    // Fetch threads across multiple label queries, deduplicating by thread ID
+    const threadMap = new Map<string, gmail_v1.Schema$Thread>()
 
-    while (allThreads.length < maxThreads) {
-      const remaining = maxThreads - allThreads.length
-      const res = await GmailApi.listThreads(client, {
-        labelIds,
-        maxResults: Math.min(remaining, 50),
-        pageToken,
-      })
+    for (const labelIds of labelQueries) {
+      let pageToken: string | undefined
+      let fetched = 0
+      const perQueryMax = maxThreads
 
-      // threads.list returns minimal data — fetch metadata in parallel batches
-      const threadIds = res.threads.map((t) => t.id).filter(Boolean) as string[]
-      const BATCH_SIZE = 10
-      for (let i = 0; i < threadIds.length; i += BATCH_SIZE) {
-        const batch = threadIds.slice(i, i + BATCH_SIZE)
-        const results = await Promise.allSettled(
-          batch.map((id) => GmailApi.getThread(client, id, "metadata"))
-        )
-        for (const result of results) {
-          if (result.status === "fulfilled") {
-            allThreads.push(result.value)
+      while (fetched < perQueryMax) {
+        const remaining = perQueryMax - fetched
+        const res = await GmailApi.listThreads(client, {
+          labelIds,
+          maxResults: Math.min(remaining, 50),
+          pageToken,
+        })
+
+        // threads.list returns minimal data — fetch metadata in parallel batches
+        // Skip threads we already have from a previous query
+        const newThreadIds = res.threads
+          .map((t) => t.id)
+          .filter((id): id is string => id != null && !threadMap.has(id))
+
+        const BATCH_SIZE = 10
+        for (let i = 0; i < newThreadIds.length; i += BATCH_SIZE) {
+          const batch = newThreadIds.slice(i, i + BATCH_SIZE)
+          const results = await Promise.allSettled(
+            batch.map((id) => GmailApi.getThread(client, id, "metadata"))
+          )
+          for (const result of results) {
+            if (result.status === "fulfilled" && result.value.id) {
+              threadMap.set(result.value.id, result.value)
+            }
           }
         }
-      }
 
-      pageToken = res.nextPageToken
-      if (!pageToken) break
+        fetched += res.threads.length
+        pageToken = res.nextPageToken
+        if (!pageToken) break
+      }
     }
 
     return {
-      threads: allThreads,
+      threads: [...threadMap.values()],
       historyId: profile.historyId,
     }
   }

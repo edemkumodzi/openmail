@@ -26,7 +26,7 @@ describe("mock data shape validation", () => {
     })
 
     test("every folder has a valid type", () => {
-      const validTypes = ["inbox", "sent", "drafts", "trash", "spam", "archive", "custom"]
+      const validTypes = ["inbox", "sent", "drafts", "trash", "spam", "starred", "archive", "custom"]
       for (const folder of MockData.folders) {
         expect(validTypes).toContain(folder.type)
       }

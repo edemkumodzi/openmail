@@ -10,9 +10,9 @@ import { createTheme } from "./theme.js"
 import { SettingsManager } from "./settings.js"
 import { EmptyBorder } from "./component/border.js"
 import { Sidebar } from "./component/sidebar.js"
-import { ThreadList } from "./component/thread-list.js"
+import { ThreadList, type ThreadListHandle } from "./component/thread-list.js"
 import { ThreadView, type ThreadViewHandle } from "./component/thread-view.js"
-import { CalendarSidebar } from "./component/calendar-sidebar.js"
+import { CalendarSidebar, type CalendarSidebarHandle } from "./component/calendar-sidebar.js"
 import { KeybindBar, type KeyHint } from "./component/keybind-bar.js"
 import { SettingsView, getSettingItems, cycleSettingValue } from "./component/settings.js"
 import { SearchView, searchThreads } from "./component/search.js"
@@ -20,7 +20,7 @@ import { ComposeView, nextField, prevField, COMPOSE_FIELDS, type ComposeField, t
 import { LinksPopup } from "./component/links-popup.js"
 
 type View = "inbox" | "thread" | "settings" | "search" | "compose"
-type Focus = "threads" | "sidebar"
+type Focus = "sidebar" | "threads" | "calendar"
 
 interface AppState {
   view: View
@@ -41,6 +41,7 @@ interface AppState {
   composeBody: string
   composeField: ComposeField
   selectedMessageIndex: number
+  selectedCalendarEventIndex: number
   showLinksPopup: boolean
   linksPopupSelectedIndex: number
 }
@@ -69,6 +70,7 @@ export function App() {
     composeBody: "",
     composeField: "to",
     selectedMessageIndex: 0,
+    selectedCalendarEventIndex: 0,
     showLinksPopup: false,
     linksPopupSelectedIndex: 0,
   })
@@ -78,29 +80,113 @@ export function App() {
   const [folders, setFolders] = createSignal<Mail.Folder[]>(MockData.folders)
   const [labels, setLabels] = createSignal<Mail.Label[]>(MockData.labels)
   const [events, setEvents] = createSignal<Mail.CalEvent[]>(MockData.events)
+  let threadListHandle: ThreadListHandle | undefined
   let threadViewHandle: ThreadViewHandle | undefined
+  let calendarSidebarHandle: CalendarSidebarHandle | undefined
 
   const [serverConnected, setServerConnected] = createSignal(false)
   const [syncStatus, setSyncStatus] = createSignal<"synced" | "syncing" | "offline" | "error">("offline")
   const [accountEmail, setAccountEmail] = createSignal(MockData.me.email)
+  const [threadCursor, setThreadCursor] = createSignal<string | undefined>(undefined)
+  const [threadsHasMore, setThreadsHasMore] = createSignal(false)
+  const [loadingMore, setLoadingMore] = createSignal(false)
+  const [searchResults, setSearchResults] = createSignal<Mail.ThreadSummary[]>([])
+  const [searchLoading, setSearchLoading] = createSignal(false)
 
-  // Fetch threads from server with current folder/label filter
-  const fetchThreads = async () => {
+  // Fetch calendar events for the next 7 days
+  const fetchEvents = async () => {
     if (!serverConnected()) return
     try {
-      const opts: { folderId?: string; labelId?: string } = {}
+      const start = new Date()
+      const end = new Date()
+      end.setDate(end.getDate() + 7)
+      const result = await MailClient.listCalendarEvents({ start, end })
+      setEvents(result)
+      // Clamp selection if event count changed
+      setState("selectedCalendarEventIndex", Math.min(state.selectedCalendarEventIndex, Math.max(0, result.length - 1)))
+    } catch {
+      // keep current data on error
+    }
+  }
+
+  // Fetch threads from server with current folder/label filter
+  // append=true loads the next page and appends to existing list
+  const fetchThreads = async (append = false) => {
+    if (!serverConnected()) return
+    if (append && !threadsHasMore()) return
+    if (append && loadingMore()) return
+    try {
+      if (append) setLoadingMore(true)
+      const opts: { folderId?: string; labelId?: string; cursor?: string } = {}
       // When filtering by label, don't also filter by folder (show label across all folders)
       if (state.activeLabel) {
         opts.labelId = state.activeLabel
       } else if (state.activeFolder) {
         opts.folderId = state.activeFolder
       }
+      if (append && threadCursor()) {
+        opts.cursor = threadCursor()
+      }
       const result = await MailClient.listThreads(opts)
-      setAllThreads(result.items)
+      if (append) {
+        setAllThreads((prev) => [...prev, ...result.items])
+      } else {
+        setAllThreads(result.items)
+      }
+      setThreadsHasMore(result.hasMore)
+      setThreadCursor(result.nextCursor)
     } catch {
       // keep current data on error
+    } finally {
+      setLoadingMore(false)
     }
   }
+
+  // Debounced server-side search: fires when searchQuery changes
+  let searchTimer: ReturnType<typeof setTimeout> | null = null
+  const performSearch = async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults([])
+      setSearchLoading(false)
+      return
+    }
+    setSearchLoading(true)
+
+    const fallbackToLocal = () => {
+      const filtered = searchThreads(allThreads(), query)
+      if (state.searchQuery === query) {
+        setSearchResults(filtered)
+        setSearchLoading(false)
+      }
+    }
+
+    if (serverConnected()) {
+      try {
+        const result = await MailClient.searchThreads({ query })
+        if (state.searchQuery === query) {
+          setSearchResults(result.items)
+          setSearchLoading(false)
+        }
+      } catch {
+        // Server search failed — fall back to client-side filtering
+        fallbackToLocal()
+      }
+    } else {
+      fallbackToLocal()
+    }
+  }
+
+  createEffect(() => {
+    const query = state.searchQuery
+    if (searchTimer) clearTimeout(searchTimer)
+    if (!query.trim()) {
+      setSearchResults([])
+      setSearchLoading(false)
+      return
+    }
+    setSearchLoading(true)
+    searchTimer = setTimeout(() => performSearch(query), 200)
+  })
 
   // Try to connect to server and load data
   onMount(async () => {
@@ -127,8 +213,8 @@ export function App() {
         if (labelResult && labelResult.length > 0) setLabels(labelResult)
         if (accounts && accounts.length > 0) setAccountEmail(accounts[0].email)
 
-        // Fetch threads for the default active folder
-        await fetchThreads()
+        // Fetch threads and calendar events
+        await Promise.all([fetchThreads(), fetchEvents()])
 
         // Subscribe to SSE for real-time updates
         const unsubscribe = MailClient.subscribe((event) => {
@@ -141,6 +227,9 @@ export function App() {
           }
           if (event.type.startsWith("label.") || event.type === "sync.completed") {
             MailClient.listLabels().then((r) => setLabels(r)).catch(() => {})
+          }
+          if (event.type.startsWith("calendar.") || event.type === "sync.completed") {
+            fetchEvents()
           }
           if (event.type.startsWith("sync.")) {
             if (event.type === "sync.started") setSyncStatus("syncing")
@@ -162,9 +251,20 @@ export function App() {
   // Re-fetch threads when folder or label filter changes
   createEffect(on(
     () => [state.activeFolder, state.activeLabel],
-    () => { fetchThreads() },
+    () => {
+      setThreadCursor(undefined)
+      setThreadsHasMore(false)
+      fetchThreads()
+    },
     { defer: true }
   ))
+
+  // If calendar disappears (terminal resize) while focused, fall back to threads
+  createEffect(() => {
+    if (state.focus === "calendar" && !calendarVisible()) {
+      setState("focus", "threads")
+    }
+  })
 
   // Sidebar items: folders + labels as one navigable list
   // The "Labels" header row is skipped during navigation
@@ -405,17 +505,32 @@ export function App() {
         { key: "q", label: "back" },
       ]
     }
+    if (state.focus === "calendar") {
+      const hints: KeyHint[] = [
+        { key: "j/k", label: "navigate" },
+      ]
+      const selectedEvent = calendarSidebarHandle?.getEvent(state.selectedCalendarEventIndex)
+      if (selectedEvent?.conferenceUrl) {
+        hints.push({ key: "enter", label: "join meeting" })
+      }
+      hints.push(
+        { key: "tab", label: "next panel" },
+        { key: "esc", label: "threads" },
+      )
+      return hints
+    }
     if (state.focus === "sidebar") {
       return [
         { key: "j/k", label: "navigate" },
         { key: "enter", label: "select" },
-        { key: "tab", label: "threads" },
+        { key: "tab", label: "next panel" },
+        { key: "esc", label: "threads" },
       ]
     }
     const hints: KeyHint[] = [
       { key: "j/k", label: "navigate" },
       { key: "enter", label: "open" },
-      { key: "tab", label: "sidebar" },
+      { key: "tab", label: "next panel" },
     ]
     if (state.activeLabel) {
       hints.push({ key: "esc", label: "clear filter" })
@@ -575,8 +690,7 @@ export function App() {
       if (evt.name === "escape") {
         if (state.searchTyping && state.searchQuery.length > 0) {
           // Stop typing, move to results navigation
-          const results = searchThreads(threads(), state.searchQuery)
-          if (results.length > 0) {
+          if (searchResults().length > 0) {
             setState({ searchTyping: false, searchSelectedIndex: 0 })
           } else {
             closeSearch()
@@ -598,8 +712,7 @@ export function App() {
         }
         if (evt.name === "return") {
           // Enter = stop typing, navigate results
-          const results = searchThreads(threads(), state.searchQuery)
-          if (results.length > 0) {
+          if (searchResults().length > 0) {
             setState({ searchTyping: false, searchSelectedIndex: 0 })
           }
           evt.preventDefault()
@@ -627,8 +740,7 @@ export function App() {
 
       // Navigation mode
       if (evt.name === "j" || evt.name === "down") {
-        const results = searchThreads(threads(), state.searchQuery)
-        setState("searchSelectedIndex", Math.min(state.searchSelectedIndex + 1, results.length - 1))
+        setState("searchSelectedIndex", Math.min(state.searchSelectedIndex + 1, searchResults().length - 1))
         evt.preventDefault()
         return
       }
@@ -638,8 +750,7 @@ export function App() {
         return
       }
       if (evt.name === "return") {
-        const results = searchThreads(threads(), state.searchQuery)
-        const thread = results[state.searchSelectedIndex]
+        const thread = searchResults()[state.searchSelectedIndex]
         if (thread) openThread(thread)
         evt.preventDefault()
         return
@@ -666,9 +777,15 @@ export function App() {
       return
     }
 
-    // Tab toggles focus between sidebar and threads
+    // Tab cycles focus: sidebar → threads → calendar → sidebar (shift+tab reverses)
     if (evt.name === "tab" && state.view === "inbox") {
-      setState("focus", state.focus === "threads" ? "sidebar" : "threads")
+      const panels: Focus[] = calendarVisible()
+        ? ["sidebar", "threads", "calendar"]
+        : ["sidebar", "threads"]
+      const currentIdx = panels.indexOf(state.focus)
+      const dir = evt.shift ? -1 : 1
+      const nextIdx = (currentIdx + dir + panels.length) % panels.length
+      setState("focus", panels[nextIdx]!)
       evt.preventDefault()
       return
     }
@@ -677,16 +794,15 @@ export function App() {
     if (state.focus === "sidebar" && state.view === "inbox") {
       if (evt.name === "j" || evt.name === "down") {
         const next = Math.min(state.selectedSidebarIndex + 1, sidebarItemCount() - 1)
-        setState("selectedSidebarIndex", next)
+        selectSidebarItem(next)
         evt.preventDefault()
       }
       if (evt.name === "k" || evt.name === "up") {
         const prev = Math.max(state.selectedSidebarIndex - 1, 0)
-        setState("selectedSidebarIndex", prev)
+        selectSidebarItem(prev)
         evt.preventDefault()
       }
       if (evt.name === "return") {
-        selectSidebarItem(state.selectedSidebarIndex)
         setState("focus", "threads")
         evt.preventDefault()
       }
@@ -701,14 +817,62 @@ export function App() {
       return
     }
 
+    // Calendar sidebar navigation
+    if (state.focus === "calendar" && state.view === "inbox") {
+      if (evt.name === "j" || evt.name === "down") {
+        const count = calendarSidebarHandle?.eventCount() ?? 0
+        if (count > 0) {
+          const nextIdx = Math.min(state.selectedCalendarEventIndex + 1, count - 1)
+          setState("selectedCalendarEventIndex", nextIdx)
+          calendarSidebarHandle?.scrollToIndex(nextIdx)
+        }
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "k" || evt.name === "up") {
+        const prevIdx = Math.max(state.selectedCalendarEventIndex - 1, 0)
+        setState("selectedCalendarEventIndex", prevIdx)
+        calendarSidebarHandle?.scrollToIndex(prevIdx)
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "return") {
+        // Open conference URL if the selected event has one
+        const event = calendarSidebarHandle?.getEvent(state.selectedCalendarEventIndex)
+        if (event?.conferenceUrl) {
+          openUrlInBrowser(event.conferenceUrl)
+        }
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "escape") {
+        setState("focus", "threads")
+        evt.preventDefault()
+        return
+      }
+      if (evt.name === "q") {
+        exitApp()
+        return
+      }
+      return
+    }
+
     // Thread list navigation
     if (state.view === "inbox" && state.focus === "threads") {
       if (evt.name === "j" || evt.name === "down") {
-        setState("selectedThreadIndex", Math.min(state.selectedThreadIndex + 1, threads().length - 1))
+        const nextIdx = Math.min(state.selectedThreadIndex + 1, threads().length - 1)
+        setState("selectedThreadIndex", nextIdx)
+        threadListHandle?.scrollToIndex(nextIdx)
+        // Auto-load next page when near the bottom
+        if (nextIdx >= threads().length - 3 && threadsHasMore() && !loadingMore()) {
+          fetchThreads(true)
+        }
         evt.preventDefault()
       }
       if (evt.name === "k" || evt.name === "up") {
-        setState("selectedThreadIndex", Math.max(state.selectedThreadIndex - 1, 0))
+        const prevIdx = Math.max(state.selectedThreadIndex - 1, 0)
+        setState("selectedThreadIndex", prevIdx)
+        threadListHandle?.scrollToIndex(prevIdx)
         evt.preventDefault()
       }
       if (evt.name === "return") {
@@ -858,15 +1022,23 @@ export function App() {
         {/* Center column: email panel + keybind bar */}
         <box flexDirection="column" flexGrow={1}>
           {/* Email panel */}
-          <box flexDirection="column" flexGrow={1} backgroundColor={theme().backgroundPanel} paddingTop={1} paddingBottom={1}>
+          <box
+            flexDirection="column"
+            flexGrow={1}
+            backgroundColor={theme().backgroundPanel}
+            paddingBottom={1}
+            border={["top"]}
+            borderColor={state.focus === "threads" ? theme().borderActive : theme().backgroundPanel}
+          >
             <Switch>
               <Match when={state.view === "search"}>
                 <SearchView
                   theme={theme()}
-                  threads={threads()}
+                  results={searchResults()}
                   query={state.searchQuery}
                   selectedIndex={state.searchSelectedIndex}
                   focused={state.searchTyping}
+                  loading={searchLoading()}
                   maxWidth={emailPanelWidth()}
                   onSelect={(i) => setState("searchSelectedIndex", i)}
                   onOpen={openThread}
@@ -880,6 +1052,7 @@ export function App() {
                   onSelect={(i) => setState("selectedThreadIndex", i)}
                   onOpen={openThread}
                   maxWidth={emailPanelWidth()}
+                  ref={(handle) => { threadListHandle = handle }}
                 />
               </Match>
               <Match when={state.view === "thread" && state.activeThread}>
@@ -925,6 +1098,9 @@ export function App() {
             events={events()}
             activeThreadId={activeThreadId()}
             width={calendarWidth()}
+            focused={state.focus === "calendar"}
+            selectedIndex={state.selectedCalendarEventIndex}
+            ref={(handle) => { calendarSidebarHandle = handle }}
           />
         </Show>
       </box>

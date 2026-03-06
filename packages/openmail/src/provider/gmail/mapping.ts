@@ -16,7 +16,7 @@ export namespace GmailMapping {
     DRAFT: "drafts",
     TRASH: "trash",
     SPAM: "spam",
-    STARRED: "custom", // starred is handled as a flag, not a folder type
+    STARRED: "starred",
     IMPORTANT: "custom",
     CATEGORY_PERSONAL: "custom",
     CATEGORY_SOCIAL: "custom",
@@ -35,7 +35,7 @@ export namespace GmailMapping {
 
   /** Label IDs we should hide from the user. */
   const HIDDEN_LABEL_IDS = new Set([
-    "UNREAD", "STARRED", "IMPORTANT", "DRAFT",
+    "UNREAD", "IMPORTANT", "DRAFT",
     "CATEGORY_PERSONAL", "CATEGORY_SOCIAL",
     "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS",
     "CHAT",
@@ -213,9 +213,17 @@ export namespace GmailMapping {
       }
     }
 
+    // Synthesize an Archive folder — Gmail doesn't have an explicit archive label
+    folders.push({
+      id: "folder:ARCHIVE",
+      name: "Archive",
+      type: "archive",
+      unreadCount: 0,
+    })
+
     // Sort folders: inbox first, then alphabetical
     const folderOrder: Record<string, number> = {
-      inbox: 0, sent: 1, drafts: 2, trash: 3, spam: 4, archive: 5, custom: 6,
+      inbox: 0, starred: 1, sent: 2, drafts: 3, archive: 4, trash: 5, spam: 6, custom: 7,
     }
     folders.sort((a, b) => (folderOrder[a.type] ?? 99) - (folderOrder[b.type] ?? 99))
 

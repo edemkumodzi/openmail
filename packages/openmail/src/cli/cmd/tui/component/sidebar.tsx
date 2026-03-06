@@ -27,9 +27,10 @@ export function Sidebar(props: SidebarProps) {
       width={props.width}
       flexShrink={0}
       height="100%"
-      paddingTop={1}
       paddingRight={1}
       backgroundColor={t().background}
+      border={["top"]}
+      borderColor={props.focused ? t().borderActive : t().background}
     >
       <For each={props.folders}>
         {(folder, index) => {

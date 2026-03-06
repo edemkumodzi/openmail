@@ -521,12 +521,14 @@ describe("GmailMapping — labelsToFoldersAndLabels", () => {
 
     const result = GmailMapping.labelsToFoldersAndLabels(labels, "acc-1")
 
-    // System labels → folders (excluding UNREAD, STARRED which are hidden)
-    expect(result.folders.length).toBeGreaterThanOrEqual(4)
+    // System labels → folders (UNREAD hidden; STARRED visible; + synthetic Archive)
+    expect(result.folders.length).toBeGreaterThanOrEqual(6)
     expect(result.folders.find((f) => f.type === "inbox")).toBeDefined()
+    expect(result.folders.find((f) => f.type === "starred")).toBeDefined()
     expect(result.folders.find((f) => f.type === "sent")).toBeDefined()
     expect(result.folders.find((f) => f.type === "trash")).toBeDefined()
     expect(result.folders.find((f) => f.type === "spam")).toBeDefined()
+    expect(result.folders.find((f) => f.type === "archive")).toBeDefined()
 
     // Inbox should have unread count
     const inbox = result.folders.find((f) => f.type === "inbox")!
@@ -550,7 +552,7 @@ describe("GmailMapping — labelsToFoldersAndLabels", () => {
     expect(result.folders[0].name).toBe("Inbox")
   })
 
-  test("hides system labels like UNREAD, STARRED, IMPORTANT", () => {
+  test("hides system labels like UNREAD, IMPORTANT, but shows STARRED", () => {
     const labels: gmail_v1.Schema$Label[] = [
       { id: "UNREAD", name: "UNREAD", type: "system" },
       { id: "STARRED", name: "STARRED", type: "system" },
@@ -560,7 +562,12 @@ describe("GmailMapping — labelsToFoldersAndLabels", () => {
     ]
 
     const result = GmailMapping.labelsToFoldersAndLabels(labels, "acc-1")
-    expect(result.folders).toHaveLength(0) // All hidden
+    // STARRED is visible + synthetic Archive folder is always added
+    expect(result.folders).toHaveLength(2)
+    expect(result.folders.find((f) => f.id === "folder:STARRED")).toBeDefined()
+    expect(result.folders.find((f) => f.id === "folder:STARRED")!.type).toBe("starred")
+    expect(result.folders.find((f) => f.id === "folder:ARCHIVE")).toBeDefined()
+    expect(result.folders.find((f) => f.id === "folder:ARCHIVE")!.type).toBe("archive")
     expect(result.labels).toHaveLength(0)
   })
 })

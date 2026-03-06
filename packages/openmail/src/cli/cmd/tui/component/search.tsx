@@ -1,21 +1,13 @@
-import { For, Show, createMemo } from "solid-js"
+import { For, Show } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import { Mail } from "../../../../mail/types.js"
 import { type Theme } from "../theme.js"
 import { formatRelativeTime, truncate } from "../util.js"
 import { EmptyBorder } from "./border.js"
 
-interface SearchViewProps {
-  theme: Theme
-  threads: Mail.ThreadSummary[]
-  query: string
-  selectedIndex: number
-  focused: boolean
-  maxWidth: number
-  onSelect: (index: number) => void
-  onOpen: (thread: Mail.ThreadSummary) => void
-}
-
+/**
+ * Client-side thread search filter — used as offline fallback when server is unavailable.
+ */
 export function searchThreads(threads: Mail.ThreadSummary[], query: string): Mail.ThreadSummary[] {
   if (!query.trim()) return []
   const q = query.toLowerCase().trim()
@@ -27,10 +19,22 @@ export function searchThreads(threads: Mail.ThreadSummary[], query: string): Mai
   })
 }
 
+interface SearchViewProps {
+  theme: Theme
+  results: Mail.ThreadSummary[]
+  query: string
+  selectedIndex: number
+  focused: boolean
+  loading: boolean
+  maxWidth: number
+  onSelect: (index: number) => void
+  onOpen: (thread: Mail.ThreadSummary) => void
+}
+
 export function SearchView(props: SearchViewProps) {
   const t = () => props.theme
 
-  const results = createMemo(() => searchThreads(props.threads, props.query))
+  const results = () => props.results
 
   return (
     <box flexDirection="column" flexGrow={1}>
@@ -123,8 +127,15 @@ export function SearchView(props: SearchViewProps) {
         </scrollbox>
       </Show>
 
+      {/* Loading state */}
+      <Show when={props.loading && results().length === 0}>
+        <box flexGrow={1} justifyContent="center" alignItems="center">
+          <text fg={t().textMuted}>Searching...</text>
+        </box>
+      </Show>
+
       {/* Empty state */}
-      <Show when={props.query.trim().length > 0 && results().length === 0}>
+      <Show when={!props.loading && props.query.trim().length > 0 && results().length === 0}>
         <box flexGrow={1} justifyContent="center" alignItems="center">
           <text fg={t().textMuted}>No threads match your search</text>
         </box>

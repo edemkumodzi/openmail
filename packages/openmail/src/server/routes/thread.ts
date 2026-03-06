@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { Cache } from "../../cache/index.js"
 import * as schema from "../../cache/schema.js"
-import { eq, desc, and, inArray } from "drizzle-orm"
+import { eq, desc, and, inArray, notInArray, lt, like } from "drizzle-orm"
 import { ProviderRegistry } from "../../provider/registry.js"
 import { EventBus } from "../../bus/index.js"
 import { Mime } from "../../provider/gmail/mime.js"
@@ -106,11 +106,27 @@ export function threadRoutes(): Hono {
 
     // Filter by folder
     if (folderId) {
-      const links = db.select({ threadId: schema.threadFolder.threadId })
-        .from(schema.threadFolder)
-        .where(eq(schema.threadFolder.folderId, folderId))
-        .all()
-      threadIds = links.map((l) => l.threadId)
+      if (folderId === "folder:ARCHIVE") {
+        // Archive = threads NOT in INBOX, TRASH, SPAM, or DRAFT
+        const excludeFolders = ["folder:INBOX", "folder:TRASH", "folder:SPAM", "folder:DRAFT"]
+        const excludedLinks = db.select({ threadId: schema.threadFolder.threadId })
+          .from(schema.threadFolder)
+          .where(inArray(schema.threadFolder.folderId, excludeFolders))
+          .all()
+        const excludedIds = new Set(excludedLinks.map((l) => l.threadId))
+
+        // Get all thread IDs that exist in the cache
+        const allThreadRows = db.select({ id: schema.thread.id })
+          .from(schema.thread)
+          .all()
+        threadIds = allThreadRows.map((t) => t.id).filter((id) => !excludedIds.has(id))
+      } else {
+        const links = db.select({ threadId: schema.threadFolder.threadId })
+          .from(schema.threadFolder)
+          .where(eq(schema.threadFolder.folderId, folderId))
+          .all()
+        threadIds = links.map((l) => l.threadId)
+      }
     }
 
     // Filter by label
@@ -171,6 +187,13 @@ export function threadRoutes(): Hono {
       }
       conditions.push(inArray(schema.thread.id, threadIds))
     }
+    // Cursor-based pagination: cursor is an ISO timestamp; fetch threads older than it
+    if (cursor) {
+      const cursorDate = new Date(cursor)
+      if (!isNaN(cursorDate.getTime())) {
+        conditions.push(lt(schema.thread.lastMessageTime, cursorDate))
+      }
+    }
 
     const where = conditions.length > 0 ? and(...conditions) : undefined
 
@@ -212,7 +235,85 @@ export function threadRoutes(): Hono {
       }
     })
 
-    return c.json({ items: enriched, hasMore })
+    // nextCursor = ISO timestamp of the last item's time (for fetching the next page)
+    const lastItem = items[items.length - 1]
+    const nextCursor = hasMore && lastItem
+      ? new Date(lastItem.lastMessageTime).toISOString()
+      : undefined
+
+    return c.json({ items: enriched, hasMore, nextCursor })
+  })
+
+  // GET /threads/search?q=query — server-side search via provider
+  app.get("/search", async (c) => {
+    const db = Cache.get()
+    const query = c.req.query("q") ?? ""
+    const limit = parseInt(c.req.query("limit") ?? "50", 10)
+    const cursor = c.req.query("cursor")
+
+    if (!query.trim()) {
+      return c.json({ items: [], hasMore: false })
+    }
+
+    try {
+      // Find the account's provider
+      const acct = db.select().from(schema.account).limit(1).get()
+      if (!acct) return c.json({ items: [], hasMore: false })
+
+      const provider = ProviderRegistry.get(acct.providerId)
+      const searchable = ProviderRegistry.asSearchable(provider)
+
+      if (!searchable) {
+        // Fallback: search the local cache by subject/snippet
+        const pattern = `%${query}%`
+        const threads = db.select()
+          .from(schema.thread)
+          .where(like(schema.thread.subject, pattern))
+          .orderBy(desc(schema.thread.lastMessageTime))
+          .limit(limit + 1)
+          .all()
+
+        const hasMore = threads.length > limit
+        const items = hasMore ? threads.slice(0, limit) : threads
+        return c.json({
+          items: items.map((t) => ({
+            id: t.id,
+            accountId: t.accountId,
+            subject: t.subject,
+            snippet: t.snippet,
+            participants: t.participants,
+            messageCount: t.messageCount,
+            hasAttachments: t.hasAttachments,
+            folders: [],
+            labels: [],
+            unread: t.unread,
+            starred: t.starred,
+            time: t.lastMessageTime,
+            linkedEventIds: [],
+          })),
+          hasMore,
+        })
+      }
+
+      // Use provider's search (e.g., Gmail's powerful server-side search)
+      const result = await searchable.search(query, {
+        limit,
+        cursor: cursor ?? undefined,
+      })
+
+      return c.json({
+        items: result.items.map((t) => ({
+          ...t,
+          time: t.time,
+          linkedEventIds: t.linkedEventIds ?? [],
+        })),
+        hasMore: result.hasMore,
+        nextCursor: result.nextCursor,
+      })
+    } catch (err) {
+      console.error(`Search failed for query="${query}":`, err)
+      return c.json({ items: [], hasMore: false })
+    }
   })
 
   // GET /threads/:id — get thread detail with messages

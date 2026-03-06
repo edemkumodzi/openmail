@@ -10,10 +10,11 @@
  * Does NOT implement Pushable (requires Google Cloud Pub/Sub setup).
  */
 import { Mail } from "../../mail/types.js"
-import { MailProvider } from "../types.js"
+import { MailProvider, CalendarProvider } from "../types.js"
 import { OAuth } from "../../auth/oauth.js"
 import { CredentialStore } from "../../auth/store.js"
 import { GmailApi } from "./api.js"
+import { CalendarApi } from "./calendar-api.js"
 import { GmailMapping } from "./mapping.js"
 import { GmailSync } from "./sync.js"
 
@@ -32,7 +33,8 @@ export namespace GmailProvider {
     MailProvider.Plugin,
     MailProvider.Searchable,
     MailProvider.Labelable,
-    MailProvider.IncrementallySyncable
+    MailProvider.IncrementallySyncable,
+    CalendarProvider.Plugin
   {
     readonly info: MailProvider.Info = {
       id: "gmail",
@@ -43,10 +45,12 @@ export namespace GmailProvider {
         "search",
         "incremental-sync",
         "drafts",
+        "calendar",
       ],
     }
 
     private client: ReturnType<typeof GmailApi.createClient> | null = null
+    private calendarClient: ReturnType<typeof CalendarApi.createClient> | null = null
     private accountId: string
     private config: Config
 
@@ -67,11 +71,22 @@ export namespace GmailProvider {
       return this.client
     }
 
+    private getCalendarClient(): ReturnType<typeof CalendarApi.createClient> {
+      if (!this.calendarClient) {
+        this.calendarClient = CalendarApi.createClient({
+          accountId: this.accountId,
+          clientId: this.config.clientId,
+          clientSecret: this.config.clientSecret,
+        })
+      }
+      return this.calendarClient
+    }
+
     // --- Lifecycle ---
 
     async auth(): Promise<Mail.AuthResult> {
       const tokenSet = await OAuth.authorize(this.config, {
-        includeCalendar: false,
+        includeCalendar: true,
       })
 
       // Fetch user info
@@ -415,11 +430,193 @@ export namespace GmailProvider {
         throw err
       }
     }
+
+    // --- CalendarProvider ---
+
+    async listCalendars(): Promise<Mail.Calendar[]> {
+      const client = this.getCalendarClient()
+      const entries = await CalendarApi.listCalendars(client)
+      return entries.map((cal) => ({
+        id: cal.id!,
+        accountId: this.accountId,
+        name: cal.summary ?? cal.id ?? "Untitled",
+        color: cal.backgroundColor ?? undefined,
+        source: "google" as const,
+        writable: cal.accessRole === "owner" || cal.accessRole === "writer",
+      }))
+    }
+
+    async listEvents(calendarId: string, range: Mail.DateRange): Promise<Mail.CalEvent[]> {
+      const client = this.getCalendarClient()
+      const result = await CalendarApi.listEvents(client, calendarId, {
+        timeMin: range.start,
+        timeMax: range.end,
+      })
+      return result.events
+        .filter((e) => e.status !== "cancelled")
+        .map((e) => mapGoogleEventToCalEvent(e, calendarId, this.accountId))
+    }
+
+    async getEvent(calendarId: string, eventId: string): Promise<Mail.CalEvent> {
+      const client = this.getCalendarClient()
+      const event = await CalendarApi.getEvent(client, calendarId, eventId)
+      return mapGoogleEventToCalEvent(event, calendarId, this.accountId)
+    }
+
+    async createEvent(calendarId: string, event: CalendarProvider.NewEvent): Promise<Mail.CalEvent> {
+      const client = this.getCalendarClient()
+      const res = await client.calendar.events.insert({
+        calendarId,
+        requestBody: {
+          summary: event.summary,
+          description: event.description,
+          location: event.location,
+          start: event.allDay
+            ? { date: event.start.toISOString().split("T")[0] }
+            : { dateTime: event.start.toISOString() },
+          end: event.allDay
+            ? { date: event.end.toISOString().split("T")[0] }
+            : { dateTime: event.end.toISOString() },
+          attendees: event.attendees?.map((a) => ({ email: a.email, displayName: a.name })),
+          conferenceData: event.conferenceUrl ? { entryPoints: [{ entryPointType: "video", uri: event.conferenceUrl }] } : undefined,
+        },
+      })
+      return mapGoogleEventToCalEvent(res.data, calendarId, this.accountId)
+    }
+
+    async updateEvent(calendarId: string, eventId: string, updates: Partial<CalendarProvider.NewEvent>): Promise<Mail.CalEvent> {
+      const client = this.getCalendarClient()
+      const requestBody: Record<string, any> = {}
+      if (updates.summary !== undefined) requestBody.summary = updates.summary
+      if (updates.description !== undefined) requestBody.description = updates.description
+      if (updates.location !== undefined) requestBody.location = updates.location
+      if (updates.start !== undefined) {
+        requestBody.start = updates.allDay
+          ? { date: updates.start.toISOString().split("T")[0] }
+          : { dateTime: updates.start.toISOString() }
+      }
+      if (updates.end !== undefined) {
+        requestBody.end = updates.allDay
+          ? { date: updates.end.toISOString().split("T")[0] }
+          : { dateTime: updates.end.toISOString() }
+      }
+
+      const res = await client.calendar.events.patch({
+        calendarId,
+        eventId,
+        requestBody,
+      })
+      return mapGoogleEventToCalEvent(res.data, calendarId, this.accountId)
+    }
+
+    async deleteEvent(calendarId: string, eventId: string): Promise<void> {
+      const client = this.getCalendarClient()
+      await client.calendar.events.delete({
+        calendarId,
+        eventId,
+      })
+    }
+
+    async respondToInvite(eventId: string, response: "accepted" | "tentative" | "declined"): Promise<void> {
+      const client = this.getCalendarClient()
+      const stored = CredentialStore.get(this.accountId)
+      if (!stored) throw new Error("No credentials found")
+
+      // Get the event first to find which calendar it's on
+      // Most invites appear on the primary calendar
+      const event = await CalendarApi.getEvent(client, "primary", eventId)
+      const attendees = event.attendees ?? []
+      const updated = attendees.map((a) => {
+        if (a.email === stored.email || a.self) {
+          return { ...a, responseStatus: response }
+        }
+        return a
+      })
+
+      await client.calendar.events.patch({
+        calendarId: "primary",
+        eventId,
+        requestBody: { attendees: updated },
+      })
+    }
+
+    /**
+     * Get the private calendar client for direct use in sync logic.
+     * @internal Used by startup.ts for calendar sync.
+     */
+    getCalendarClientForSync(): ReturnType<typeof CalendarApi.createClient> {
+      return this.getCalendarClient()
+    }
+  }
+
+  /**
+   * Map a Google Calendar API event to our CalEvent type.
+   */
+  function mapGoogleEventToCalEvent(
+    e: any,
+    calendarId: string,
+    accountId: string
+  ): Mail.CalEvent {
+    const start = e.start?.dateTime
+      ? new Date(e.start.dateTime)
+      : e.start?.date
+        ? new Date(e.start.date + "T00:00:00")
+        : new Date()
+    const end = e.end?.dateTime
+      ? new Date(e.end.dateTime)
+      : e.end?.date
+        ? new Date(e.end.date + "T00:00:00")
+        : new Date()
+    const allDay = !e.start?.dateTime
+
+    const organizer: Mail.Participant = {
+      name: e.organizer?.displayName ?? "",
+      email: e.organizer?.email ?? "",
+    }
+
+    const attendees: Mail.CalAttendee[] = (e.attendees ?? []).map((a: any) => ({
+      participant: {
+        name: a.displayName ?? a.email ?? "",
+        email: a.email ?? "",
+      },
+      status: a.responseStatus ?? "needs-action",
+      role: a.optional ? "optional" as const : "required" as const,
+    }))
+
+    // Determine user's status from attendees list
+    const selfAttendee = (e.attendees ?? []).find((a: any) => a.self)
+    const myStatus = selfAttendee?.responseStatus ?? null
+
+    // Extract conference URL
+    const conferenceUrl = e.conferenceData?.entryPoints?.find(
+      (ep: any) => ep.entryPointType === "video"
+    )?.uri ?? e.hangoutLink ?? undefined
+
+    return {
+      id: e.id ?? "",
+      calendarId,
+      accountId,
+      uid: e.iCalUID ?? e.id ?? "",
+      summary: e.summary ?? "(No title)",
+      description: e.description ?? undefined,
+      location: e.location ?? undefined,
+      start,
+      end,
+      allDay,
+      organizer,
+      attendees,
+      myStatus,
+      recurrence: e.recurringEventId ?? undefined,
+      conferenceUrl,
+      source: "api",
+      linkedThreadIds: [],
+    }
   }
 }
 
 // Re-export submodules for direct access
 export { GmailApi } from "./api.js"
+export { CalendarApi } from "./calendar-api.js"
 export { GmailMapping } from "./mapping.js"
 export { GmailSync } from "./sync.js"
 export { Mime } from "./mime.js"

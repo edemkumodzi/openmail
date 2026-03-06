@@ -22,7 +22,7 @@ import { ProviderRegistry } from "./provider/registry.js"
 import { GmailProvider } from "./provider/gmail/index.js"
 import { EventBus } from "./bus/index.js"
 import * as schema from "./cache/schema.js"
-import { eq } from "drizzle-orm"
+import { eq, and } from "drizzle-orm"
 
 export namespace Startup {
   export interface Result {
@@ -209,7 +209,9 @@ export namespace Startup {
         ProviderRegistry.asLabelable(provider)?.listLabels() ?? Promise.resolve([]),
       ])
 
-      // Store folders (clear stale first)
+      // Clear join tables first (FK-safe order), then folders/labels
+      db.delete(schema.threadFolder).run()
+      db.delete(schema.threadLabel).run()
       db.delete(schema.folder).where(eq(schema.folder.accountId, accountId)).run()
       for (const folder of providerFolders) {
         db.insert(schema.folder)
@@ -307,6 +309,100 @@ export namespace Startup {
             .values({ threadId: thread.id, labelId })
             .onConflictDoNothing()
             .run()
+        }
+      }
+
+      // --- 3. Sync calendar events ---
+      const calendarProvider = ProviderRegistry.asCalendar(provider)
+      if (calendarProvider) {
+        try {
+          const calendars = await calendarProvider.listCalendars()
+
+          // Clear in FK-safe order: event_thread links -> events -> calendars
+          const existingEvents = db.select({ id: schema.calEvent.id })
+            .from(schema.calEvent)
+            .where(eq(schema.calEvent.accountId, accountId))
+            .all()
+          for (const evt of existingEvents) {
+            db.delete(schema.eventThread).where(eq(schema.eventThread.eventId, evt.id)).run()
+          }
+          db.delete(schema.calEvent).where(eq(schema.calEvent.accountId, accountId)).run()
+          db.delete(schema.calendar).where(eq(schema.calendar.accountId, accountId)).run()
+
+          // Store calendars
+          for (const cal of calendars) {
+            db.insert(schema.calendar)
+              .values({
+                id: cal.id,
+                accountId,
+                providerCalendarId: cal.id,
+                name: cal.name,
+                color: cal.color ?? null,
+                source: cal.source,
+                writable: cal.writable,
+              })
+              .onConflictDoNothing()
+              .run()
+          }
+
+          // Fetch events for the next 14 days from all calendars
+          const now = new Date()
+          const twoWeeksFromNow = new Date()
+          twoWeeksFromNow.setDate(twoWeeksFromNow.getDate() + 14)
+
+          for (const cal of calendars) {
+            try {
+              const events = await calendarProvider.listEvents(cal.id, {
+                start: now,
+                end: twoWeeksFromNow,
+              })
+
+              for (const event of events) {
+                db.insert(schema.calEvent)
+                  .values({
+                    id: event.id,
+                    calendarId: cal.id,
+                    accountId,
+                    uid: event.uid ?? event.id,
+                    summary: event.summary,
+                    description: event.description ?? null,
+                    location: event.location ?? null,
+                    startTime: event.start,
+                    endTime: event.end,
+                    allDay: event.allDay,
+                    organizer: event.organizer as any,
+                    attendees: event.attendees as any,
+                    myStatus: event.myStatus,
+                    recurrence: event.recurrence ?? null,
+                    conferenceUrl: event.conferenceUrl ?? null,
+                    source: "api",
+                  })
+                  .onConflictDoUpdate({
+                    target: schema.calEvent.id,
+                    set: {
+                      summary: event.summary,
+                      description: event.description ?? null,
+                      location: event.location ?? null,
+                      startTime: event.start,
+                      endTime: event.end,
+                      allDay: event.allDay,
+                      organizer: event.organizer as any,
+                      attendees: event.attendees as any,
+                      myStatus: event.myStatus,
+                      recurrence: event.recurrence ?? null,
+                      conferenceUrl: event.conferenceUrl ?? null,
+                    },
+                  })
+                  .run()
+              }
+            } catch (calErr) {
+              // Some calendars may fail (e.g. shared calendars with restricted access)
+              console.error(`Calendar sync failed for ${cal.name}:`, calErr)
+            }
+          }
+        } catch (calErr) {
+          // Calendar sync failure shouldn't break mail sync
+          console.error("Calendar sync failed:", calErr)
         }
       }
 

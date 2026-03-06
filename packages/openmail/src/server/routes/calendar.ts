@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { Cache } from "../../cache/index.js"
 import * as schema from "../../cache/schema.js"
-import { eq, and, gte, lte } from "drizzle-orm"
+import { eq, and, gte, lte, inArray } from "drizzle-orm"
 
 export function calendarRoutes(): Hono {
   const app = new Hono()
@@ -34,6 +34,18 @@ export function calendarRoutes(): Hono {
       .orderBy(schema.calEvent.startTime)
       .all()
 
+    // Batch-fetch linked thread IDs for all events
+    const eventIds = events.map((e) => e.id)
+    const links = eventIds.length > 0
+      ? db.select().from(schema.eventThread).where(inArray(schema.eventThread.eventId, eventIds)).all()
+      : []
+    const linkMap = new Map<string, string[]>()
+    for (const link of links) {
+      const arr = linkMap.get(link.eventId)
+      if (arr) arr.push(link.threadId)
+      else linkMap.set(link.eventId, [link.threadId])
+    }
+
     return c.json({
       items: events.map((e) => ({
         id: e.id,
@@ -52,7 +64,7 @@ export function calendarRoutes(): Hono {
         recurrence: e.recurrence,
         conferenceUrl: e.conferenceUrl,
         source: e.source,
-        linkedThreadIds: [],
+        linkedThreadIds: linkMap.get(e.id) ?? [],
       })),
     })
   })

@@ -1,9 +1,13 @@
 import { For } from "solid-js"
-import { TextAttributes } from "@opentui/core"
+import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { Mail } from "../../../../mail/types.js"
 import { type Theme } from "../theme.js"
 import { formatRelativeTime, truncate } from "../util.js"
 import { EmptyBorder } from "./border.js"
+
+export interface ThreadListHandle {
+  scrollToIndex: (index: number) => void
+}
 
 interface ThreadListProps {
   theme: Theme
@@ -12,13 +16,49 @@ interface ThreadListProps {
   onSelect: (index: number) => void
   onOpen: (thread: Mail.ThreadSummary) => void
   maxWidth: number
+  ref?: (handle: ThreadListHandle) => void
 }
 
 export function ThreadList(props: ThreadListProps) {
   const t = () => props.theme
+  let scrollboxRef: ScrollBoxRenderable | undefined
+
+  const getItemBoxes = (): any[] | null => {
+    if (!scrollboxRef) return null
+    const children = scrollboxRef.content.getChildren()
+    const wrapper = children[0]
+    if (!wrapper) return null
+    return (wrapper as any).getChildren?.() ?? null
+  }
+
+  const scrollToIndex = (index: number) => {
+    if (!scrollboxRef) return
+    setTimeout(() => {
+      if (!scrollboxRef) return
+      const boxes = getItemBoxes()
+      if (!boxes || index >= boxes.length) return
+
+      const target = boxes[index]
+      if (!target) return
+
+      // target.y is screen-space; convert to content-space by adding current scrollTop
+      const contentY = (target.y as number) + scrollboxRef.scrollTop
+      const targetHeight = target.height as number
+      const viewportHeight = scrollboxRef.viewport.height
+
+      // Keep the selected item centered in the viewport (like vim with scrolloff=999)
+      const centeredScroll = contentY - (viewportHeight - targetHeight) / 2
+      scrollboxRef.scrollTo(Math.max(0, centeredScroll))
+    }, 16)
+  }
+
+  // Expose handle via ref
+  if (props.ref) {
+    props.ref({ scrollToIndex })
+  }
 
   return (
-    <scrollbox flexGrow={1} paddingLeft={1} paddingRight={2} scrollbarOptions={{ visible: false }}>
+    <scrollbox ref={scrollboxRef} flexGrow={1} paddingLeft={1} paddingRight={2} scrollbarOptions={{ visible: false }}>
       <box flexDirection="column">
         <For each={props.threads}>
           {(thread, index) => {

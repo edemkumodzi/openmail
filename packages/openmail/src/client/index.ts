@@ -79,11 +79,12 @@ export namespace MailClient {
     const query = params.toString()
     const url = `/threads${query ? `?${query}` : ""}`
 
-    const data = await fetchJson<{ items: any[]; hasMore: boolean }>(url)
+    const data = await fetchJson<{ items: any[]; hasMore: boolean; nextCursor?: string }>(url)
 
     return {
       items: data.items.map(normalizeThread),
       hasMore: data.hasMore,
+      nextCursor: data.nextCursor,
     }
   }
 
@@ -93,6 +94,27 @@ export namespace MailClient {
       return normalizeThreadDetail(data)
     } catch {
       return null
+    }
+  }
+
+  export async function searchThreads(opts: {
+    query: string
+    limit?: number
+    cursor?: string
+  }): Promise<Mail.Paginated<Mail.ThreadSummary>> {
+    const params = new URLSearchParams()
+    params.set("q", opts.query)
+    if (opts.limit) params.set("limit", String(opts.limit))
+    if (opts.cursor) params.set("cursor", opts.cursor)
+
+    const data = await fetchJson<{ items: any[]; hasMore: boolean; nextCursor?: string }>(
+      `/threads/search?${params}`
+    )
+
+    return {
+      items: data.items.map(normalizeThread),
+      hasMore: data.hasMore,
+      nextCursor: data.nextCursor,
     }
   }
 

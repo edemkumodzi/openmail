@@ -80,7 +80,7 @@ export namespace Mail {
   export interface Folder {
     id: string
     name: string
-    type: "inbox" | "sent" | "drafts" | "trash" | "spam" | "archive" | "custom"
+    type: "inbox" | "sent" | "drafts" | "trash" | "spam" | "starred" | "archive" | "custom"
     unreadCount: number
   }
 
