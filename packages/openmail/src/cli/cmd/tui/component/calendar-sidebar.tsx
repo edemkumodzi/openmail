@@ -31,10 +31,11 @@ export function CalendarSidebar(props: CalendarSidebarProps) {
       flexDirection="column"
       width={props.width}
       flexShrink={0}
+      height="100%"
       paddingTop={1}
       paddingLeft={2}
-      paddingRight={2}
-      backgroundColor={t().backgroundPanel}
+      paddingRight={1}
+      backgroundColor={t().background}
     >
       <box paddingBottom={1}>
         <text fg={t().text} attributes={TextAttributes.BOLD}>Calendar</text>

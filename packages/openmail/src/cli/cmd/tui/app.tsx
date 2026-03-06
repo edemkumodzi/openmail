@@ -394,7 +394,7 @@ export function App() {
       ]
     }
     if (state.view === "thread") {
-      const hints: KeyHint[] = [
+      return [
         { key: "j/k", label: "scroll" },
         { key: "J/K", label: "next/prev msg" },
         { key: "l", label: "links" },
@@ -405,7 +405,6 @@ export function App() {
         { key: "u", label: "unread" },
         { key: "q", label: "back" },
       ]
-      return hints
     }
     if (state.focus === "sidebar") {
       return [
@@ -842,9 +841,9 @@ export function App() {
       flexDirection="column"
       backgroundColor={theme().background}
     >
-      {/* Main content area */}
-      <box flexDirection="row" flexGrow={1} gap={1} paddingTop={1} paddingBottom={1} paddingLeft={1} paddingRight={1}>
-        {/* Left sidebar */}
+      {/* Main layout: sidebars extend full height, keybind bar inside email panel */}
+      <box flexDirection="row" flexGrow={1} alignItems="stretch">
+        {/* Left sidebar — full height */}
         <Sidebar
           theme={theme()}
           folders={folders()}
@@ -866,64 +865,70 @@ export function App() {
           }}
         />
 
-        {/* Email panel */}
-        <box flexDirection="column" flexGrow={1} backgroundColor={theme().backgroundPanel} paddingTop={1} paddingBottom={1}>
-          <Switch>
-            <Match when={state.view === "search"}>
-              <SearchView
-                theme={theme()}
-                threads={threads()}
-                query={state.searchQuery}
-                selectedIndex={state.searchSelectedIndex}
-                focused={state.searchTyping}
-                maxWidth={emailPanelWidth()}
-                onSelect={(i) => setState("searchSelectedIndex", i)}
-                onOpen={openThread}
-              />
-            </Match>
-            <Match when={state.view !== "thread" || !state.activeThread}>
-              <ThreadList
-                theme={theme()}
-                threads={threads()}
-                selectedIndex={state.selectedThreadIndex}
-                onSelect={(i) => setState("selectedThreadIndex", i)}
-                onOpen={openThread}
-                maxWidth={emailPanelWidth()}
-              />
-            </Match>
-            <Match when={state.view === "thread" && state.activeThread}>
-              <box flexDirection="column" flexGrow={1}>
-                {/* Thread header */}
-                <box
-                  flexShrink={0}
-                  paddingLeft={2}
-                  paddingRight={2}
-                  paddingBottom={1}
-                  flexDirection="row"
-                  justifyContent="space-between"
-                  gap={1}
-                >
-                  <text fg={theme().text} wrapMode="none">
-                    <span style={{ fg: theme().textMuted }}>{"\u2190"} Inbox</span>
-                    <span style={{ bold: true, fg: theme().text }}>{"  "}{state.activeThread!.subject}</span>
-                  </text>
-                  <text fg={theme().textMuted} flexShrink={0} wrapMode="none">
-                    {state.activeThread!.messageCount} {state.activeThread!.messageCount === 1 ? "msg" : "msgs"}
-                  </text>
-                </box>
-                <ThreadView
+        {/* Center column: email panel + keybind bar */}
+        <box flexDirection="column" flexGrow={1}>
+          {/* Email panel */}
+          <box flexDirection="column" flexGrow={1} backgroundColor={theme().backgroundPanel} paddingTop={1} paddingBottom={1}>
+            <Switch>
+              <Match when={state.view === "search"}>
+                <SearchView
                   theme={theme()}
-                  thread={state.activeThread!}
-                  selectedMessageIndex={state.selectedMessageIndex}
-                  onSelectedMessageChange={(idx) => setState("selectedMessageIndex", idx)}
-                  ref={(handle) => { threadViewHandle = handle }}
+                  threads={threads()}
+                  query={state.searchQuery}
+                  selectedIndex={state.searchSelectedIndex}
+                  focused={state.searchTyping}
+                  maxWidth={emailPanelWidth()}
+                  onSelect={(i) => setState("searchSelectedIndex", i)}
+                  onOpen={openThread}
                 />
-              </box>
-            </Match>
-          </Switch>
+              </Match>
+              <Match when={state.view !== "thread" || !state.activeThread}>
+                <ThreadList
+                  theme={theme()}
+                  threads={threads()}
+                  selectedIndex={state.selectedThreadIndex}
+                  onSelect={(i) => setState("selectedThreadIndex", i)}
+                  onOpen={openThread}
+                  maxWidth={emailPanelWidth()}
+                />
+              </Match>
+              <Match when={state.view === "thread" && state.activeThread}>
+                <box flexDirection="column" flexGrow={1}>
+                  {/* Thread header */}
+                  <box
+                    flexShrink={0}
+                    paddingLeft={2}
+                    paddingRight={2}
+                    paddingBottom={1}
+                    flexDirection="row"
+                    justifyContent="space-between"
+                    gap={1}
+                  >
+                    <text fg={theme().text} wrapMode="none">
+                      <span style={{ fg: theme().textMuted }}>{"\u2190"} Inbox</span>
+                      <span style={{ bold: true, fg: theme().text }}>{"  "}{state.activeThread!.subject}</span>
+                    </text>
+                    <text fg={theme().textMuted} flexShrink={0} wrapMode="none">
+                      {state.activeThread!.messageCount} {state.activeThread!.messageCount === 1 ? "msg" : "msgs"}
+                    </text>
+                  </box>
+                  <ThreadView
+                    theme={theme()}
+                    thread={state.activeThread!}
+                    selectedMessageIndex={state.selectedMessageIndex}
+                    onSelectedMessageChange={(idx) => setState("selectedMessageIndex", idx)}
+                    ref={(handle) => { threadViewHandle = handle }}
+                  />
+                </box>
+              </Match>
+            </Switch>
+          </box>
+
+          {/* Keybind bar — inside center column, below email panel */}
+          <KeybindBar theme={theme()} hints={keybindHints()} />
         </box>
 
-        {/* Calendar sidebar */}
+        {/* Calendar sidebar — full height */}
         <Show when={calendarVisible()}>
           <CalendarSidebar
             theme={theme()}
@@ -933,9 +938,6 @@ export function App() {
           />
         </Show>
       </box>
-
-      {/* Keybind bar */}
-      <KeybindBar theme={theme()} hints={keybindHints()} email={accountEmail()} syncStatus={syncStatus()} />
 
       {/* Settings overlay */}
       <Show when={state.view === "settings"}>

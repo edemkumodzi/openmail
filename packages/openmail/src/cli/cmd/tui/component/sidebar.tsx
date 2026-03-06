@@ -26,8 +26,10 @@ export function Sidebar(props: SidebarProps) {
       flexDirection="column"
       width={props.width}
       flexShrink={0}
+      height="100%"
       paddingTop={1}
-      backgroundColor={t().backgroundPanel}
+      paddingRight={1}
+      backgroundColor={t().background}
     >
       <For each={props.folders}>
         {(folder, index) => {
